@@ -1,0 +1,32 @@
+export { LambdaDBVectorStore } from "./lambdadb-vector-store.js";
+export type {
+  LambdaDBConfig,
+  SimilarityMetric,
+  CreateCollectionOptions,
+  SimilaritySearchOptions,
+  SimilaritySearchResult,
+  LambdaDBDocument,
+  QueryOptions,
+  DocumentFilter,
+  MaxMarginalRelevanceSearchOptions,
+  DeleteOptions,
+  EnhancedSimilaritySearchOptions,
+  CollectionInfo,
+} from "./types.js";
+export {
+  documentToLambdaDB,
+  lambdaDBToDocument,
+  formatSearchResults,
+  generateDocumentId,
+  validateVectorDimensions,
+  validateConfig,
+  handleLambdaDBError,
+  batchArray,
+  withRetry,
+  DEFAULT_RETRY_OPTIONS,
+  LambdaDBConnectionError,
+  LambdaDBAuthenticationError,
+  LambdaDBResourceNotFoundError,
+  LambdaDBValidationError,
+  LambdaDBRateLimitError,
+} from "./utils.js";

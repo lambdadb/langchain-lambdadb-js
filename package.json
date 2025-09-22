@@ -1,0 +1,54 @@
+{
+  "name": "langchain-lambdadb",
+  "version": "1.0.0",
+  "description": "LangChain integration for LambdaDB vector database",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "type": "module",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "build:clean": "rm -rf dist && npm run build",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "test:ui": "vitest --ui",
+    "test:integration": "vitest run tests/integration",
+    "test:unit": "vitest run tests --exclude tests/integration",
+    "lint": "eslint src/**/*.ts",
+    "prettier": "prettier --write src/**/*.ts",
+    "prepare": "npm run build"
+  },
+  "keywords": [
+    "langchain",
+    "lambdadb",
+    "vector-database",
+    "typescript",
+    "ai",
+    "embeddings"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@functional-systems/lambdadb": "^0.1.5",
+    "@langchain/core": "^0.3.77"
+  },
+  "devDependencies": {
+    "@types/node": "^24.5.2",
+    "@vitest/ui": "^3.2.4",
+    "eslint": "^9.36.0",
+    "prettier": "^3.6.2",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  }
+}
