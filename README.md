@@ -24,28 +24,28 @@ npm install langchain-lambdadb @langchain/core
 ## Quick Start
 
 ```typescript
-import { LambdaDBVectorStore } from 'langchain-lambdadb';
-import { OpenAIEmbeddings } from '@langchain/openai';
-import { Document } from '@langchain/core/documents';
+import { LambdaDBVectorStore } from "langchain-lambdadb";
+import { OpenAIEmbeddings } from "@langchain/openai";
+import { Document } from "@langchain/core/documents";
 
 // Initialize embeddings
 const embeddings = new OpenAIEmbeddings({
-  apiKey: process.env.OPENAI_API_KEY
+  apiKey: process.env.OPENAI_API_KEY,
 });
 
 // Configure LambdaDB connection
 const config = {
-  projectApiKey: process.env.LAMBDADB_API_KEY!,
-  serverURL: process.env.LAMBDADB_SERVER_URL, // Optional: custom server
-  collectionName: 'my-documents',
+  projectApiKey: process.env.LAMBDADB_PROJECT_API_KEY!,
+  projectUrl: process.env.LAMBDADB_PROJECT_URL!, // Full project URL
+  collectionName: "my-documents",
   vectorDimensions: 1536, // OpenAI embedding dimensions
-  similarityMetric: 'cosine',
+  similarityMetric: "cosine",
   // Optional: Configure retry behavior
   retryOptions: {
     maxAttempts: 3,
     initialDelay: 500,
-    maxDelay: 5000
-  }
+    maxDelay: 5000,
+  },
 };
 
 // Create vector store
@@ -56,44 +56,51 @@ await vectorStore.createCollection();
 
 // Add documents
 const documents = [
-  new Document({ 
-    pageContent: 'LangChain is a framework for developing applications powered by language models.',
-    metadata: { source: 'documentation', category: 'framework' }
+  new Document({
+    pageContent:
+      "LangChain is a framework for developing applications powered by language models.",
+    metadata: { source: "documentation", category: "framework" },
   }),
-  new Document({ 
-    pageContent: 'LambdaDB is a vector database optimized for AI applications.',
-    metadata: { source: 'documentation', category: 'database' }
-  })
+  new Document({
+    pageContent: "LambdaDB is a vector database optimized for AI applications.",
+    metadata: { source: "documentation", category: "database" },
+  }),
 ];
 
 await vectorStore.addDocuments(documents);
 
 // Perform similarity search
-const results = await vectorStore.similaritySearch('What is LangChain?', 5);
+const results = await vectorStore.similaritySearch("What is LangChain?", 5);
 console.log(results);
+
+// Perform similarity search with server-side filter
+const filteredResults = await vectorStore.similaritySearch("LangChain", 5, {
+  category: "framework", // Server-side filter object
+});
+console.log(filteredResults);
 ```
 
 ## Configuration Options
 
 ### LambdaDBConfig
 
-| Option | Type | Required | Description |
-|--------|------|----------|-------------|
-| `projectApiKey` | `string` | ✅ | Your LambdaDB project API key |
-| `collectionName` | `string` | ✅ | Name of the collection to use |
-| `vectorDimensions` | `number` | ✅ | Vector dimensions for embeddings |
-| `similarityMetric` | `SimilarityMetric` | ❌ | Similarity metric (default: 'cosine') |
-| `serverURL` | `string` | ❌ | Custom LambdaDB server URL (note: serverURL not serverUrl) |
-| `textField` | `string` | ❌ | Field name for document content (default: 'content') |
-| `vectorField` | `string` | ❌ | Field name for vectors (default: 'vector') |
-| `validateCollection` | `boolean` | ❌ | Validate collection before operations (default: false) |
-| `defaultConsistentRead` | `boolean` | ❌ | Use consistent reads by default (default: true) |
-| `retryOptions` | `RetryOptions` | ❌ | Configure retry behavior with exponential backoff |
+| Option                  | Type               | Required | Description                                                |
+| ----------------------- | ------------------ | -------- | ---------------------------------------------------------- |
+| `projectApiKey`         | `string`           | ✅       | Your LambdaDB project API key                              |
+| `collectionName`        | `string`           | ✅       | Name of the collection to use                              |
+| `vectorDimensions`      | `number`           | ✅       | Vector dimensions for embeddings                           |
+| `similarityMetric`      | `SimilarityMetric` | ❌       | Similarity metric (default: 'cosine')                      |
+| `serverURL`             | `string`           | ❌       | Custom LambdaDB server URL (note: serverURL not serverUrl) |
+| `textField`             | `string`           | ❌       | Field name for document content (default: 'content')       |
+| `vectorField`           | `string`           | ❌       | Field name for vectors (default: 'vector')                 |
+| `validateCollection`    | `boolean`          | ❌       | Validate collection before operations (default: false)     |
+| `defaultConsistentRead` | `boolean`          | ❌       | Use consistent reads by default (default: true)            |
+| `retryOptions`          | `RetryOptions`     | ❌       | Configure retry behavior with exponential backoff          |
 
 ### Similarity Metrics
 
 - `'cosine'` - Cosine similarity (default, recommended for most use cases)
-- `'euclidean'` - Euclidean distance 
+- `'euclidean'` - Euclidean distance
 - `'dot_product'` - Dot product similarity
 
 ## Usage Examples
@@ -101,20 +108,18 @@ console.log(results);
 ### Basic Vector Search
 
 ```typescript
-import { LambdaDBVectorStore } from 'langchain-lambdadb';
-import { OpenAIEmbeddings } from '@langchain/openai';
+import { LambdaDBVectorStore } from "langchain-lambdadb";
+import { OpenAIEmbeddings } from "@langchain/openai";
 
-const vectorStore = new LambdaDBVectorStore(
-  new OpenAIEmbeddings(),
-  {
-    projectApiKey: process.env.LAMBDADB_API_KEY!,
-    collectionName: 'documents',
-    vectorDimensions: 1536,
-  }
-);
+const vectorStore = new LambdaDBVectorStore(new OpenAIEmbeddings(), {
+  projectApiKey: process.env.LAMBDADB_PROJECT_API_KEY!,
+  projectUrl: process.env.LAMBDADB_PROJECT_URL!,
+  collectionName: "documents",
+  vectorDimensions: 1536,
+});
 
 // Search with custom parameters
-const results = await vectorStore.similaritySearchWithScore('query text', 10);
+const results = await vectorStore.similaritySearchWithScore("query text", 10);
 results.forEach(([doc, score]) => {
   console.log(`Score: ${score}, Content: ${doc.pageContent}`);
 });
@@ -123,18 +128,19 @@ results.forEach(([doc, score]) => {
 ### Using with Different Embedding Models
 
 ```typescript
-import { HuggingFaceTransformersEmbeddings } from '@langchain/community/embeddings/hf_transformers';
+import { HuggingFaceTransformersEmbeddings } from "@langchain/community/embeddings/hf_transformers";
 
 // Using Hugging Face embeddings
 const embeddings = new HuggingFaceTransformersEmbeddings({
-  modelName: 'Xenova/all-MiniLM-L6-v2',
+  modelName: "Xenova/all-MiniLM-L6-v2",
 });
 
 const vectorStore = new LambdaDBVectorStore(embeddings, {
-  projectApiKey: process.env.LAMBDADB_API_KEY!,
-  collectionName: 'hf-documents',
+  projectApiKey: process.env.LAMBDADB_PROJECT_API_KEY!,
+  projectUrl: process.env.LAMBDADB_PROJECT_URL!,
+  collectionName: "hf-documents",
   vectorDimensions: 384, // all-MiniLM-L6-v2 dimensions
-  similarityMetric: 'cosine'
+  similarityMetric: "cosine",
 });
 ```
 
@@ -143,15 +149,15 @@ const vectorStore = new LambdaDBVectorStore(embeddings, {
 ```typescript
 // Create vector store from texts
 const texts = [
-  'The quick brown fox jumps over the lazy dog.',
-  'Machine learning is a subset of artificial intelligence.',
-  'Vector databases enable efficient similarity search.'
+  "The quick brown fox jumps over the lazy dog.",
+  "Machine learning is a subset of artificial intelligence.",
+  "Vector databases enable efficient similarity search.",
 ];
 
 const metadatas = [
-  { category: 'literature' },
-  { category: 'technology' },
-  { category: 'database' }
+  { category: "literature" },
+  { category: "technology" },
+  { category: "database" },
 ];
 
 const vectorStore = await LambdaDBVectorStore.fromTexts(
@@ -167,11 +173,11 @@ const vectorStore = await LambdaDBVectorStore.fromTexts(
 ```typescript
 // MMR search for diverse results
 const mmrResults = await vectorStore.maxMarginalRelevanceSearch(
-  'machine learning frameworks', 
+  "machine learning frameworks",
   {
-    k: 5,        // Number of results to return
-    fetchK: 20,  // Number of initial candidates to fetch
-    lambda: 0.7  // Balance between relevance (1.0) and diversity (0.0)
+    k: 5, // Number of results to return
+    fetchK: 20, // Number of initial candidates to fetch
+    lambda: 0.7, // Balance between relevance (1.0) and diversity (0.0)
   }
 );
 ```
@@ -181,7 +187,7 @@ const mmrResults = await vectorStore.maxMarginalRelevanceSearch(
 ```typescript
 // Search with custom filter
 const filterFunction = (doc: Document) => {
-  return doc.metadata.category === 'technology';
+  return doc.metadata.category === "technology";
 };
 
 const filteredResults = await vectorStore.similaritySearchVectorWithScore(
@@ -194,20 +200,20 @@ const filteredResults = await vectorStore.similaritySearchVectorWithScore(
 ### RAG (Retrieval-Augmented Generation) Integration
 
 ```typescript
-import { ChatOpenAI } from '@langchain/openai';
-import { ConversationalRetrievalQAChain } from 'langchain/chains';
+import { ChatOpenAI } from "@langchain/openai";
+import { ConversationalRetrievalQAChain } from "langchain/chains";
 
 const llm = new ChatOpenAI();
 const retriever = vectorStore.asRetriever({
-  searchType: 'similarity',
-  searchKwargs: { k: 6 }
+  searchType: "similarity",
+  searchKwargs: { k: 6 },
 });
 
 const chain = ConversationalRetrievalQAChain.fromLLM(llm, retriever);
 
 const response = await chain.call({
-  question: 'What is the main topic of the documents?',
-  chat_history: []
+  question: "What is the main topic of the documents?",
+  chat_history: [],
 });
 ```
 
@@ -224,35 +230,45 @@ new LambdaDBVectorStore(embeddings: EmbeddingsInterface, config: LambdaDBConfig)
 #### Methods
 
 ##### `addDocuments(documents: Document[]): Promise<void>`
+
 Adds documents to the vector store with automatic embedding generation.
 
 ##### `addVectors(vectors: number[][], documents: Document[]): Promise<void>`
+
 Adds pre-computed vectors with associated documents.
 
 ##### `similaritySearch(query: string, k?: number, filter?: DocumentFilter): Promise<Document[]>`
+
 Performs similarity search with a text query.
 
 ##### `similaritySearchVectorWithScore(query: number[], k: number, filter?: DocumentFilter): Promise<[Document, number][]>`
+
 Performs similarity search with a vector query, returns documents with similarity scores.
 
 ##### `maxMarginalRelevanceSearch(query: string, options?: MMRSearchOptions): Promise<Document[]>`
+
 Performs Max Marginal Relevance search for diverse results balancing relevance and diversity.
 
 ##### `createCollection(options?: Partial<CreateCollectionOptions>): Promise<void>`
+
 Creates a new collection in LambdaDB with proper state monitoring.
 
 ##### `deleteCollection(): Promise<void>`
+
 Deletes the collection from LambdaDB.
 
 ##### `getCollectionInfo(): Promise<CollectionInfo>`
+
 Returns information about the collection including status and document count.
 
 #### Static Factory Methods
 
 ##### `fromTexts(texts: string[], metadatas: object[] | object, embeddings: EmbeddingsInterface, config: LambdaDBConfig): Promise<LambdaDBVectorStore>`
+
 Creates a vector store from an array of texts.
 
 ##### `fromDocuments(docs: Document[], embeddings: EmbeddingsInterface, config: LambdaDBConfig): Promise<LambdaDBVectorStore>`
+
 Creates a vector store from an array of documents.
 
 ## Environment Variables
@@ -260,8 +276,8 @@ Creates a vector store from an array of documents.
 You can set your LambdaDB credentials using environment variables:
 
 ```bash
-export LAMBDADB_API_KEY="your-api-key-here"
-export LAMBDADB_SERVER_URL="https://your-instance.lambdadb.ai"  # Optional
+export LAMBDADB_PROJECT_URL="your-project-url-here"
+export LAMBDADB_PROJECT_API_KEY="your-api-key-here"
 ```
 
 ## Error Handling
@@ -272,12 +288,12 @@ The library provides comprehensive error handling:
 try {
   await vectorStore.addDocuments(documents);
 } catch (error) {
-  if (error.message.includes('LambdaDB Error')) {
-    console.error('LambdaDB service error:', error.message);
-  } else if (error.message.includes('Vector dimension mismatch')) {
-    console.error('Embedding dimension error:', error.message);
+  if (error.message.includes("LambdaDB Error")) {
+    console.error("LambdaDB service error:", error.message);
+  } else if (error.message.includes("Vector dimension mismatch")) {
+    console.error("Embedding dimension error:", error.message);
   } else {
-    console.error('Unexpected error:', error.message);
+    console.error("Unexpected error:", error.message);
   }
 }
 ```
@@ -293,11 +309,11 @@ npm test
 # Run only unit tests
 npm run test:unit
 
-# Run only integration tests (requires LAMBDADB_API_KEY)
+# Run only integration tests (requires LAMBDADB_PROJECT_API_KEY)
 npm run test:integration
 ```
 
-**Integration Tests**: Set `LAMBDADB_API_KEY` and optionally `LAMBDADB_SERVER_URL` to run integration tests against real LambdaDB service.
+**Integration Tests**: Set `LAMBDADB_PROJECT_API_KEY` and optionally `LAMBDADB_PROJECT_URL` to run integration tests against real LambdaDB service.
 
 ### Building
 
@@ -327,19 +343,23 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ### Key Features Implemented
 
-- **Eventual Consistency Handling**: Uses `consistentRead: true` by default for immediate consistency
+- **Eventual Consistency**: Uses `consistentRead: false` by default for better performance (Python-aligned)
+- **Document Size Validation**: Enforces 50KB maximum document size limit
+- **Server-Side Filtering**: Supports object filters passed directly to LambdaDB KNN queries
 - **Collection State Management**: Proper waiting for collection to become ACTIVE before operations
 - **Error Handling**: Comprehensive error handling with retry logic and exponential backoff
 - **Field Name Configuration**: Supports custom field names for text and vector data
-- **Batch Processing**: Efficient bulk operations with proper error handling
+- **Batch Processing**: Efficient bulk operations (100 documents per batch) with proper error handling
 - **Test Coverage**: 43 tests covering all functionality including edge cases
 
 ### LambdaDB Integration Notes
 
-- Uses KNN query format: `{ knn: { field, queryVector, k } }`
-- Requires exact parameter name `serverURL` (not `serverUrl`)
-- Supports immediate consistency with `consistentRead: true`
-- Collection creation includes state polling until ACTIVE
+- Uses KNN query format: `{ knn: { field, queryVector, k } }` with optional `filter` support
+- Accepts full project URLs (e.g., `https://project-123.lambdadb.ai`) instead of separate server/ID
+- Supports server-side filtering via object filters in KNN queries
+- Enforces 50KB document size limit (matching Python implementation)
+- Batch processing: 100 documents per batch (safe after size validation)
+- Default eventual consistency (`consistentRead: false`) for better performance
 
 ## Links
 

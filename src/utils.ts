@@ -286,3 +286,18 @@ export function batchArray<T>(array: T[], batchSize: number): T[][] {
   }
   return batches;
 }
+
+/**
+ * Extract server URL from full project URL
+ * @param projectUrl Full project URL (e.g., "https://project-123.lambdadb.ai")
+ * @returns Server URL for LambdaDB client
+ */
+export function extractServerURLFromProjectUrl(projectUrl: string): string {
+  try {
+    const url = new URL(projectUrl);
+    // Return the origin (protocol + hostname + port)
+    return url.origin;
+  } catch (error) {
+    throw new Error(`Invalid project URL format: ${projectUrl}`);
+  }
+}

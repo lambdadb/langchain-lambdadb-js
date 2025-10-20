@@ -22,8 +22,8 @@ export type SimilarityMetric = 'cosine' | 'euclidean' | 'dot_product' | 'max_inn
 export interface LambdaDBConfig {
   /** LambdaDB project API key */
   projectApiKey: string;
-  /** Custom server URL (optional) */
-  serverURL?: string;
+  /** Full project URL (e.g., "https://project-123.lambdadb.ai") */
+  projectUrl: string;
   /** Name of the collection to use */
   collectionName: string;
   /** Vector dimensions for the embeddings */
@@ -34,7 +34,7 @@ export interface LambdaDBConfig {
   indexConfig?: Record<string, any>;
   /** Name of the text field in documents (default: "content") */
   textField?: string;
-  /** Name of the vector field in documents (default: "embedding") */
+  /** Name of the vector field in documents (default: "vector") */
   vectorField?: string;
   /** Whether to validate that the collection exists on initialization */
   validateCollection?: boolean;
@@ -110,22 +110,22 @@ export interface QueryOptions {
 }
 
 /**
- * Filter type for document filtering
+ * Filter type for document filtering - supports both server-side objects and client-side functions
  */
-export type DocumentFilter = (doc: Document) => boolean;
+export type DocumentFilter = ((doc: Document) => boolean) | Record<string, any>;
 
 /**
  * Options for maximum marginal relevance search
  */
-export interface MaxMarginalRelevanceSearchOptions {
+export interface MaxMarginalRelevanceSearchOptions<FilterType = string | object> {
   /** Number of results to return (default: 4) */
   k?: number;
   /** Number of candidates to fetch initially (default: 20) */
   fetchK?: number;
   /** Diversity factor (0 = max diversity, 1 = max relevance) (default: 0.5) */
   lambda?: number;
-  /** Filter function for documents */
-  filter?: DocumentFilter | string | object;
+  /** Filter function or object for documents */
+  filter?: FilterType;
 }
 
 /**

@@ -21,8 +21,8 @@ class MinimalEmbeddings implements EmbeddingsInterface {
 
 describe('LambdaDB Minimal Integration Test', () => {
   it('should perform basic vector store operations', async () => {
-    if (!process.env.LAMBDADB_API_KEY) {
-      throw new Error('LAMBDADB_API_KEY environment variable is required');
+    if (!process.env.LAMBDADB_PROJECT_API_KEY || !process.env.LAMBDADB_PROJECT_URL) {
+      throw new Error('LAMBDADB_PROJECT_API_KEY and LAMBDADB_PROJECT_URL environment variables are required');
     }
 
     const embeddings = new MinimalEmbeddings();
@@ -30,8 +30,8 @@ describe('LambdaDB Minimal Integration Test', () => {
     
     // Use minimal configuration to avoid hanging
     const config = {
-      projectApiKey: process.env.LAMBDADB_API_KEY!,
-      ...(process.env.LAMBDADB_SERVER_URL && { serverURL: process.env.LAMBDADB_SERVER_URL }),
+      projectApiKey: process.env.LAMBDADB_PROJECT_API_KEY!,
+      projectUrl: process.env.LAMBDADB_PROJECT_URL!,
       collectionName,
       vectorDimensions: 3,
       similarityMetric: 'cosine' as const,
