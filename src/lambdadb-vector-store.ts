@@ -20,6 +20,7 @@ import {
   generateDocumentId,
   batchArray,
   withRetry,
+  extractServerURLFromProjectUrl,
   DEFAULT_RETRY_OPTIONS,
 } from "./utils.js";
 
@@ -45,7 +46,7 @@ export class LambdaDBVectorStore extends VectorStore {
       textField: "content",
       vectorField: "vector", // Use 'vector' to match LambdaDB conventions
       validateCollection: false,
-      defaultConsistentRead: true, // Use consistent reads by default for immediate consistency
+      defaultConsistentRead: false, // Use eventual consistency by default for better performance
       ...config,
     };
     
@@ -53,10 +54,11 @@ export class LambdaDBVectorStore extends VectorStore {
     this.vectorField = this.config.vectorField!;
     this.retryOptions = { ...DEFAULT_RETRY_OPTIONS, ...(config.retryOptions || {}) };
     
-    // Initialize LambdaDB client
+    // Initialize LambdaDB client - extract server URL from project URL
+    const serverURL = extractServerURLFromProjectUrl(config.projectUrl);
     this.client = new LambdaDB({
       projectApiKey: config.projectApiKey,
-      ...(config.serverURL && { serverURL: config.serverURL }),
+      serverURL: serverURL, // LambdaDB client expects serverURL parameter
       timeoutMs: 30000, // 30 second timeout for all operations
     });
     
@@ -86,6 +88,16 @@ export class LambdaDBVectorStore extends VectorStore {
       }
 
       const texts = documents.map(({ pageContent }) => pageContent);
+      
+      // 50KB document size validation (matching Python implementation)
+      for (const [index, text] of texts.entries()) {
+        if (50 * 1000 < text.length) {
+          throw new Error(
+            `The text at index ${index} is too long. Max length is 50KB.`
+          );
+        }
+      }
+      
       const embeddings = await this.embeddings.embedDocuments(texts);
       
       await this.addVectors(embeddings, documents);
@@ -124,8 +136,8 @@ export class LambdaDBVectorStore extends VectorStore {
         return docData;
       });
 
-      // Batch upsert documents using correct API structure
-      const batchSize = 100; // Adjust based on LambdaDB limits
+      // SAFETY: Setting batch size to 100 is safe, because we've checked that there is no document longer than 50KB.
+      const batchSize = 100; // Conservative batch size for 6MB limit
       const batches = batchArray(lambdaDBDocs, batchSize);
 
       for (const batch of batches) {
@@ -154,36 +166,38 @@ export class LambdaDBVectorStore extends VectorStore {
     try {
       validateVectorDimensions(query, this.config.vectorDimensions);
 
+      // Build request body with KNN query
+      const requestBody: any = {
+        size: k,
+        query: {
+          knn: {
+            field: this.vectorField,
+            queryVector: query,
+            k: k
+          }
+        },
+        consistentRead: this.config.defaultConsistentRead,
+      };
+
+      // Add server-side filter if provided (user responsible for correct format)
+      if (filter && typeof filter === 'object' && typeof filter !== 'function') {
+        requestBody.query.knn.filter = filter;
+      }
+
       // Query LambdaDB for similar vectors using correct KNN API structure with retry
       const response = await withRetry(async () => {
         return await this.client.collections.query({
           collectionName: this.config.collectionName,
-          requestBody: {
-            size: k,
-            query: {
-              knn: {
-                field: this.vectorField,
-                queryVector: query,
-                k: k
-              }
-            },
-            consistentRead: this.config.defaultConsistentRead,
-            // Add filter support if LambdaDB supports it in the future
-          },
+          requestBody,
         });
       }, this.retryOptions);
 
-      // Convert results to LangChain format
+      // Convert results to LangChain format - no client-side filtering
       const formattedResults: [Document, number][] = response.docs.map((result) => {
         const doc = lambdaDBToDocument(result.doc, this.textField);
         const score = result.score || 0;
         return [doc, score];
       });
-
-      // Apply client-side filtering if needed
-      if (filter) {
-        return formattedResults.filter(([doc]) => filter(doc));
-      }
 
       return formattedResults;
     } catch (error) {
@@ -310,13 +324,20 @@ export class LambdaDBVectorStore extends VectorStore {
         // For filter-based deletion, we need to first find matching documents
         // This is a two-step process: search then delete
         const allDocs = await this.getAllDocuments();
-        const docsToDelete = allDocs.filter(options.filter);
-        const idsToDelete = docsToDelete
-          .map((doc) => doc.metadata.id)
-          .filter((id) => id);
+        
+        // Only support function filters for deletion (object filters are for search queries)
+        if (typeof options.filter === 'function') {
+          const filterFn = options.filter as (doc: Document) => boolean;
+          const docsToDelete = allDocs.filter(filterFn);
+          const idsToDelete = docsToDelete
+            .map((doc) => doc.metadata.id)
+            .filter((id) => id);
 
-        if (idsToDelete.length > 0) {
-          await this.deleteDocuments({ ids: idsToDelete });
+          if (idsToDelete.length > 0) {
+            await this.deleteDocuments({ ids: idsToDelete });
+          }
+        } else {
+          throw new Error("Delete operations only support function-based filters, not object filters");
         }
       } else {
         throw new Error("Must provide either ids, filter, or deleteAll option");
@@ -331,7 +352,7 @@ export class LambdaDBVectorStore extends VectorStore {
    */
   async maxMarginalRelevanceSearch(
     query: string,
-    options: MaxMarginalRelevanceSearchOptions,
+    options: MaxMarginalRelevanceSearchOptions<string | object>,
     _callbacks?: any
   ): Promise<Document[]> {
     const {
@@ -342,16 +363,22 @@ export class LambdaDBVectorStore extends VectorStore {
     } = options;
 
     try {
-      // Convert filter to function if needed
-      const filterFn: DocumentFilter | undefined = typeof filter === 'function' 
-        ? filter as DocumentFilter 
-        : undefined;
+      // Convert filter to the type expected by similaritySearchVectorWithScore
+      let searchFilter: DocumentFilter | undefined;
+      if (filter && typeof filter === 'object' && typeof filter !== 'function') {
+        // Object filter - pass through for server-side filtering
+        searchFilter = filter as Record<string, any>;
+      } else if (typeof filter === 'function') {
+        // Function filter - pass through
+        searchFilter = filter as (doc: Document) => boolean;
+      }
+      // String filters are not supported for vector search
 
       // First, get more candidates than needed
       const candidateResults = await this.similaritySearchVectorWithScore(
         await this.embeddings.embedQuery(query),
         fetchK,
-        filterFn
+        searchFilter
       );
 
       if (candidateResults.length === 0) {
@@ -510,15 +537,5 @@ export class LambdaDBVectorStore extends VectorStore {
         // This is a common race condition, so we can ignore it
       }
     }
-  }
-
-  /**
-   * Convert LangChain filter to LambdaDB format
-   * This is a placeholder - actual implementation depends on LambdaDB's filter syntax
-   */
-  private convertFilterToLambdaDB(_filter: DocumentFilter): any {
-    // This would need to be implemented based on LambdaDB's filter syntax
-    // For now, return undefined to handle filtering client-side
-    return undefined;
   }
 }
