@@ -39,16 +39,16 @@ describe('LambdaDB Comprehensive Integration Tests', () => {
   let collectionName: string;
 
   beforeEach(() => {
-    if (!process.env.LAMBDADB_API_KEY) {
-      throw new Error('LAMBDADB_API_KEY environment variable is required');
+    if (!process.env.LAMBDADB_PROJECT_API_KEY || !process.env.LAMBDADB_PROJECT_URL) {
+      throw new Error('LAMBDADB_PROJECT_API_KEY and LAMBDADB_PROJECT_URL environment variables are required');
     }
 
     embeddings = new TestEmbeddings();
     collectionName = `test_${Date.now()}_${Math.random().toString(36).substr(2, 8)}`;
     
     vectorStore = new LambdaDBVectorStore(embeddings, {
-      projectApiKey: process.env.LAMBDADB_API_KEY!,
-      ...(process.env.LAMBDADB_SERVER_URL && { serverURL: process.env.LAMBDADB_SERVER_URL }),
+      projectApiKey: process.env.LAMBDADB_PROJECT_API_KEY!,
+      projectUrl: process.env.LAMBDADB_PROJECT_URL!,
       collectionName,
       vectorDimensions: 3,
       similarityMetric: 'cosine',
@@ -181,8 +181,8 @@ describe('LambdaDB Comprehensive Integration Tests', () => {
         metadatas,
         embeddings,
         {
-          projectApiKey: process.env.LAMBDADB_API_KEY!,
-          ...(process.env.LAMBDADB_SERVER_URL && { serverURL: process.env.LAMBDADB_SERVER_URL }),
+          projectApiKey: process.env.LAMBDADB_PROJECT_API_KEY!,
+          projectUrl: process.env.LAMBDADB_PROJECT_URL!,
           collectionName: `fromtexts_${Date.now()}`,
           vectorDimensions: 3,
           similarityMetric: 'cosine',
@@ -223,8 +223,8 @@ describe('LambdaDB Comprehensive Integration Tests', () => {
         docs,
         embeddings,
         {
-          projectApiKey: process.env.LAMBDADB_API_KEY!,
-          ...(process.env.LAMBDADB_SERVER_URL && { serverURL: process.env.LAMBDADB_SERVER_URL }),
+          projectApiKey: process.env.LAMBDADB_PROJECT_API_KEY!,
+          projectUrl: process.env.LAMBDADB_PROJECT_URL!,
           collectionName: `fromdocs_${Date.now()}`,
           vectorDimensions: 3,
           similarityMetric: 'cosine',
@@ -279,8 +279,8 @@ describe('LambdaDB Comprehensive Integration Tests', () => {
   describe('Configuration Options', () => {
     it('should work with custom field names', async () => {
       const customStore = new LambdaDBVectorStore(embeddings, {
-        projectApiKey: process.env.LAMBDADB_API_KEY!,
-        ...(process.env.LAMBDADB_SERVER_URL && { serverURL: process.env.LAMBDADB_SERVER_URL }),
+        projectApiKey: process.env.LAMBDADB_PROJECT_API_KEY!,
+        projectUrl: process.env.LAMBDADB_PROJECT_URL!,
         collectionName: `custom_${Date.now()}`,
         vectorDimensions: 3,
         similarityMetric: 'cosine',
@@ -303,8 +303,8 @@ describe('LambdaDB Comprehensive Integration Tests', () => {
 
     it('should handle different similarity metrics', async () => {
       const euclideanStore = new LambdaDBVectorStore(embeddings, {
-        projectApiKey: process.env.LAMBDADB_API_KEY!,
-        ...(process.env.LAMBDADB_SERVER_URL && { serverURL: process.env.LAMBDADB_SERVER_URL }),
+        projectApiKey: process.env.LAMBDADB_PROJECT_API_KEY!,
+        projectUrl: process.env.LAMBDADB_PROJECT_URL!,
         collectionName: `euclidean_${Date.now()}`,
         vectorDimensions: 3,
         similarityMetric: 'euclidean',
