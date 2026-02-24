@@ -1,6 +1,6 @@
 {
   "name": "@functional-systems/langchain-lambdadb",
-  "version": "0.2.0-dev.0",
+  "version": "0.2.0",
   "description": "LangChain integration for LambdaDB vector database",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -44,7 +44,7 @@
     "url": "https://github.com/lambdadb/langchain-lambdadb-js"
   },
   "dependencies": {
-    "@functional-systems/lambdadb": "0.3.0-dev.3",
+    "@functional-systems/lambdadb": "^0.3.0",
     "@langchain/core": "^0.3.77"
   },
   "devDependencies": {
