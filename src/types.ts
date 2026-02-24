@@ -129,13 +129,26 @@ export interface MaxMarginalRelevanceSearchOptions {
 }
 
 /**
+ * LambdaDB filter object for server-side delete/query.
+ * Use LambdaDB query syntax, e.g. { queryString: { query: "field:value" } }.
+ * @see https://docs.lambdadb.ai/guides/documents/delete-data
+ * @see https://docs.lambdadb.ai/guides/search/query-string
+ */
+export type LambdaDBFilterObject = Record<string, unknown>;
+
+/**
  * Delete operation options
  */
 export interface DeleteOptions {
   /** Document IDs to delete */
   ids?: string[];
-  /** Filter function to select documents for deletion */
-  filter?: DocumentFilter;
+  /**
+   * Filter for which documents to delete. Prefer LambdaDB filter for efficiency (server-side).
+   * - Object: LambdaDB filter, e.g. { queryString: { query: "genre:documentary" } } → passed to API as-is.
+   * - String: treated as query string, e.g. "genre:documentary" → { queryString: { query } }.
+   * - Function: client-side filter (doc) => boolean; fetches all docs then deletes by ids (less efficient).
+   */
+  filter?: DocumentFilter | LambdaDBFilterObject | string;
   /** Whether to delete all documents in collection */
   deleteAll?: boolean;
 }

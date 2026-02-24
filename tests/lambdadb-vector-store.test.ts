@@ -29,6 +29,7 @@ const mockCollectionHandle = {
   docs: {
     upsert: vi.fn().mockResolvedValue({}),
     delete: vi.fn().mockResolvedValue({}),
+    listAll: vi.fn().mockResolvedValue({ docs: [], total: 0 }),
   }
 };
 
@@ -249,6 +250,79 @@ describe('LambdaDBVectorStore', () => {
 
       expect(results).toHaveLength(0);
     }, 10000);
+  });
+
+  describe('delete (LangChain VectorStore interface)', () => {
+    it('should throw when called with no args (avoid accidental wipe)', async () => {
+      await expect(vectorStore.delete()).rejects.toThrow(
+        'delete() requires explicit params to avoid accidental wipe'
+      );
+      expect(vectorStore['collection'].docs.delete).not.toHaveBeenCalled();
+    });
+
+    it('should throw when called with empty object', async () => {
+      await expect(vectorStore.delete({})).rejects.toThrow(
+        'delete() requires explicit params to avoid accidental wipe'
+      );
+      expect(vectorStore['collection'].docs.delete).not.toHaveBeenCalled();
+    });
+
+    it('should delete all documents when deleteAll is true', async () => {
+      await vectorStore.delete({ deleteAll: true });
+
+      expect(vectorStore['collection'].docs.delete).toHaveBeenCalledWith({
+        filter: { queryString: { query: '*:*' } },
+      });
+    });
+
+    it('should delete documents by ids when ids provided', async () => {
+      await vectorStore.delete({ ids: ['id1', 'id2'] });
+
+      expect(vectorStore['collection'].docs.delete).toHaveBeenCalledWith({
+        ids: ['id1', 'id2'],
+      });
+    });
+
+    it('should delete by LambdaDB filter object (server-side, no listAll)', async () => {
+      const lambdadbFilter = { queryString: { query: 'genre:documentary AND year:2019' } };
+      await vectorStore.delete({ filter: lambdadbFilter });
+
+      expect(vectorStore['collection'].docs.listAll).not.toHaveBeenCalled();
+      expect(vectorStore['collection'].docs.delete).toHaveBeenCalledWith({
+        filter: lambdadbFilter,
+      });
+    });
+
+    it('should delete by query string (converted to queryString filter)', async () => {
+      await vectorStore.delete({ filter: 'source:web' });
+
+      expect(vectorStore['collection'].docs.listAll).not.toHaveBeenCalled();
+      expect(vectorStore['collection'].docs.delete).toHaveBeenCalledWith({
+        filter: { queryString: { query: 'source:web' } },
+      });
+    });
+
+    it('should delete documents by filter function (client-side: listAll then delete by ids)', async () => {
+      mockCollectionHandle.docs.listAll.mockResolvedValue({
+        docs: [
+          { id: 'a', content: 'doc a' },
+          { id: 'b', content: 'doc b' },
+        ],
+        total: 2,
+      });
+
+      const filterFn = (doc: Document) => doc.metadata.id === 'a';
+      await vectorStore.delete({ filter: filterFn });
+
+      expect(vectorStore['collection'].docs.listAll).toHaveBeenCalledWith({ size: 100 });
+      expect(vectorStore['collection'].docs.delete).toHaveBeenCalledWith({ ids: ['a'] });
+    });
+
+    it('should throw when params provide no valid option', async () => {
+      await expect(vectorStore.delete({ other: 'value' })).rejects.toThrow(
+        'delete() requires one of: ids (string[]), filter (LambdaDB object/query string or function), or deleteAll (true)'
+      );
+    });
   });
 
   describe('collection management', () => {

@@ -14,6 +14,7 @@ A production-ready TypeScript library that integrates [LambdaDB](https://lambdad
 - 🧪 **Production Ready**: Comprehensive test suite with 43 passing tests (16 unit + 27 integration)
 - 🔄 **Retry Logic**: Built-in exponential backoff for robust error handling
 - 📈 **Collection Management**: Full lifecycle management with state monitoring
+- 🗑️ **Document Deletion**: LangChain `delete()` support with server-side LambdaDB filter (by ids, filter, or deleteAll)
 
 ## Installation
 
@@ -191,6 +192,44 @@ const filteredResults = await vectorStore.similaritySearchVectorWithScore(
 );
 ```
 
+### Deleting Documents
+
+The store implements the LangChain VectorStore `delete()` interface. **You must pass explicit parameters** (no default to delete all, to avoid accidental wipe).
+
+**By IDs** (most efficient when you know the ids):
+
+```typescript
+await vectorStore.delete({ ids: ['id1', 'id2'] });
+```
+
+**By LambdaDB filter** (recommended when filtering by metadata; server-side, one API call):
+
+```typescript
+// Query string – converted to LambdaDB queryString filter
+await vectorStore.delete({ filter: 'genre:documentary AND year:2019' });
+
+// Or full LambdaDB filter object
+await vectorStore.delete({
+  filter: { queryString: { query: 'genre:documentary AND year:2019' } },
+});
+```
+
+See [LambdaDB Delete data](https://docs.lambdadb.ai/guides/documents/delete-data) and [Query string](https://docs.lambdadb.ai/guides/search/query-string) for filter syntax.
+
+**Delete all documents** in the collection (explicit):
+
+```typescript
+await vectorStore.delete({ deleteAll: true });
+```
+
+**By client-side filter function** (fetches all docs then deletes by ids; use only when LambdaDB filter is not enough):
+
+```typescript
+await vectorStore.delete({
+  filter: (doc) => doc.metadata.source === 'legacy',
+});
+```
+
 ### RAG (Retrieval-Augmented Generation) Integration
 
 ```typescript
@@ -246,6 +285,17 @@ Deletes the collection from LambdaDB.
 
 ##### `getCollectionInfo(): Promise<CollectionInfo>`
 Returns information about the collection including status and document count.
+
+##### `delete(_params?: Record<string, any>): Promise<void>` (LangChain VectorStore interface)
+Deletes documents. **Requires explicit params** (no default). Use one of:
+
+- `{ ids: string[] }` – delete by document IDs
+- `{ filter: string | LambdaDBFilterObject }` – server-side delete (recommended); string is used as `queryString.query`
+- `{ filter: (doc: Document) => boolean }` – client-side filter (fetches all, then deletes by ids)
+- `{ deleteAll: true }` – delete all documents in the collection
+
+##### `deleteDocuments(options: DeleteOptions): Promise<void>`
+Lower-level delete with the same options as `delete()`: `ids`, `filter` (string, LambdaDB object, or function), or `deleteAll: true`.
 
 #### Static Factory Methods
 
@@ -340,6 +390,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - Requires exact parameter name `serverURL` (not `serverUrl`)
 - Supports immediate consistency with `consistentRead: true`
 - Collection creation includes state polling until ACTIVE
+- **Delete**: Prefer server-side filter (`filter` as string or LambdaDB object) for efficiency; `deleteAll: true` uses LambdaDB filter `{ queryString: { query: "*:*" } }`. [Delete data](https://docs.lambdadb.ai/guides/documents/delete-data)
 
 ## Links
 

@@ -272,35 +272,72 @@ export class LambdaDBVectorStore extends VectorStore {
   }
 
   /**
+   * Delete documents from the vector store (LangChain VectorStore interface).
+   * Maps _params to DeleteOptions and delegates to deleteDocuments().
+   * Requires explicit params to avoid accidental full collection wipe.
+   *
+   * @param _params - One of: { ids?: string[] } | { filter?: DocumentFilter } | { deleteAll: true }.
+   *                 Omitted or empty → throws (no default to deleteAll).
+   */
+  async delete(_params?: Record<string, any>): Promise<void> {
+    if (!_params || Object.keys(_params).length === 0) {
+      throw new Error(
+        "delete() requires explicit params to avoid accidental wipe. Pass one of: { ids: string[] }, { filter: (doc) => boolean }, or { deleteAll: true }"
+      );
+    }
+    if (_params.deleteAll === true) {
+      await this.deleteDocuments({ deleteAll: true });
+      return;
+    }
+    if (Array.isArray(_params.ids) && _params.ids.length > 0) {
+      await this.deleteDocuments({ ids: _params.ids });
+      return;
+    }
+    if (
+      typeof _params.filter === "function" ||
+      (typeof _params.filter === "object" && _params.filter !== null) ||
+      typeof _params.filter === "string"
+    ) {
+      await this.deleteDocuments({ filter: _params.filter });
+      return;
+    }
+    throw new Error(
+      "delete() requires one of: ids (string[]), filter (LambdaDB object/query string or function), or deleteAll (true)"
+    );
+  }
+
+  /**
    * Delete documents from the vector store
    */
   async deleteDocuments(options: DeleteOptions): Promise<void> {
     try {
       if (options.deleteAll) {
-        // Delete all documents by getting all and deleting by IDs
-        // LambdaDB doesn't support deleteAll directly
-        const allDocs = await this.getAllDocuments();
-        const idsToDelete = allDocs
-          .map((doc) => doc.metadata.id)
-          .filter((id) => id);
-
-        if (idsToDelete.length > 0) {
-          await this.deleteDocuments({ ids: idsToDelete });
-        }
+        // Delete all documents using LambdaDB filter with wildcard match-all.
+        // See https://docs.lambdadb.ai/guides/documents/delete-data
+        await this.collection.docs.delete({
+          filter: { queryString: { query: "*:*" } },
+        });
       } else if (options.ids && options.ids.length > 0) {
         // Delete documents by IDs
         await this.collection.docs.delete({ ids: options.ids });
-      } else if (options.filter) {
-        // For filter-based deletion, we need to first find matching documents
-        // This is a two-step process: search then delete
-        const allDocs = await this.getAllDocuments();
-        const docsToDelete = allDocs.filter(options.filter);
-        const idsToDelete = docsToDelete
-          .map((doc) => doc.metadata.id)
-          .filter((id) => id);
-
-        if (idsToDelete.length > 0) {
-          await this.deleteDocuments({ ids: idsToDelete });
+      } else if (options.filter !== undefined && options.filter !== null) {
+        if (typeof options.filter === "function") {
+          // Client-side filter: fetch all, filter, delete by ids (less efficient for large collections)
+          const allDocs = await this.getAllDocuments();
+          const docsToDelete = allDocs.filter(options.filter as DocumentFilter);
+          const idsToDelete = docsToDelete
+            .map((doc) => doc.metadata.id)
+            .filter((id) => id);
+          if (idsToDelete.length > 0) {
+            await this.deleteDocuments({ ids: idsToDelete });
+          }
+        } else {
+          // LambdaDB filter (object or query string): pass to API for server-side delete
+          const apiFilter =
+            typeof options.filter === "string"
+              ? { queryString: { query: options.filter } }
+              : (options.filter as Record<string, unknown>);
+          await this.collection.docs.delete({ filter: apiFilter });
         }
       } else {
         throw new Error("Must provide either ids, filter, or deleteAll option");
@@ -452,16 +489,23 @@ export class LambdaDBVectorStore extends VectorStore {
   }
 
   /**
-   * Get all documents from the collection (for internal operations)
+   * Get all documents from the collection (for internal operations, e.g. filter-based delete).
+   * Uses LambdaDB list API with pagination; supports both response shapes:
+   * { collection, doc } (OpenAPI example) or flat doc object.
    */
   private async getAllDocuments(): Promise<Document[]> {
     try {
-      // TODO: Implement proper "get all documents" functionality
-      // For now, return empty array since LambdaDB doesn't support simple match-all queries
-      // This affects deleteAll functionality - we'll need to implement pagination or
-      // use a different approach for bulk operations
-      console.warn('getAllDocuments not implemented - returning empty array');
-      return [];
+      const result = await this.collection.docs.listAll({ size: 100 });
+      const documents: Document[] = [];
+      for (const item of result.docs ?? []) {
+        const raw = item && typeof item === "object" && "doc" in item ? (item as { doc: Record<string, unknown> }).doc : item;
+        const doc = lambdaDBToDocument(raw as Record<string, unknown>, this.textField);
+        if (raw && typeof raw === "object" && "id" in raw && raw.id !== undefined) {
+          doc.metadata.id = raw.id as string;
+        }
+        documents.push(doc);
+      }
+      return documents;
     } catch (error) {
       throw handleLambdaDBError(error);
     }
