@@ -179,18 +179,27 @@ const mmrResults = await vectorStore.maxMarginalRelevanceSearch(
 
 ### Advanced Filtering
 
-```typescript
-// Search with custom filter
-const filterFunction = (doc: Document) => {
-  return doc.metadata.category === 'technology';
-};
+**Search** supports server-side filters (LambdaDB syntax) or a client-side function. Prefer server-side for efficiency.
 
-const filteredResults = await vectorStore.similaritySearchVectorWithScore(
+```typescript
+// Server-side: LambdaDB query string (recommended)
+const results = await vectorStore.similaritySearchVectorWithScore(
   queryVector,
   5,
-  filterFunction
+  'category:technology'
 );
+
+// Server-side: full LambdaDB filter object
+const results2 = await vectorStore.similaritySearchVectorWithScore(queryVector, 5, {
+  queryString: { query: 'category:technology AND year:2024' },
+});
+
+// Client-side: filter function (applied after fetch)
+const filterFn = (doc: Document) => doc.metadata?.category === 'technology';
+const results3 = await vectorStore.similaritySearchVectorWithScore(queryVector, 5, filterFn);
 ```
+
+See [LambdaDB Query string](https://docs.lambdadb.ai/guides/search/query-string) for filter syntax.
 
 ### Deleting Documents
 
@@ -271,8 +280,8 @@ Adds pre-computed vectors with associated documents.
 ##### `similaritySearch(query: string, k?: number, filter?: DocumentFilter): Promise<Document[]>`
 Performs similarity search with a text query.
 
-##### `similaritySearchVectorWithScore(query: number[], k: number, filter?: DocumentFilter): Promise<[Document, number][]>`
-Performs similarity search with a vector query, returns documents with similarity scores.
+##### `similaritySearchVectorWithScore(query: number[], k: number, filter?: DocumentFilter | LambdaDBFilterObject | string): Promise<[Document, number][]>`
+Performs similarity search with a vector query, returns documents with similarity scores. **Filter**: string or LambdaDB object → server-side `knn.filter`; function → client-side filter after fetch.
 
 ##### `maxMarginalRelevanceSearch(query: string, options?: MMRSearchOptions): Promise<Document[]>`
 Performs Max Marginal Relevance search for diverse results balancing relevance and diversity.

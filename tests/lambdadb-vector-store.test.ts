@@ -166,6 +166,68 @@ describe('LambdaDBVectorStore', () => {
         vectorStore.similaritySearchVectorWithScore(invalidQueryVector, 5)
       ).rejects.toThrow('Vector dimension mismatch: expected 3, got 2');
     });
+
+    it('should pass LambdaDB filter object to knn.filter (server-side)', async () => {
+      const queryVector = [0.1, 0.2, 0.3];
+      const k = 5;
+      const lambdadbFilter = { queryString: { query: 'source:docs AND year:2024' } };
+
+      await vectorStore.similaritySearchVectorWithScore(queryVector, k, lambdadbFilter);
+
+      expect(vectorStore['collection'].query).toHaveBeenCalledWith({
+        size: k,
+        query: {
+          knn: {
+            field: 'vector',
+            queryVector,
+            k,
+            filter: lambdadbFilter,
+          },
+        },
+        consistentRead: true,
+      });
+    });
+
+    it('should pass query string as knn.filter (converted to queryString)', async () => {
+      const queryVector = [0.1, 0.2, 0.3];
+      const k = 3;
+
+      await vectorStore.similaritySearchVectorWithScore(queryVector, k, 'category:tech');
+
+      expect(vectorStore['collection'].query).toHaveBeenCalledWith({
+        size: k,
+        query: {
+          knn: {
+            field: 'vector',
+            queryVector,
+            k,
+            filter: { queryString: { query: 'category:tech' } },
+          },
+        },
+        consistentRead: true,
+      });
+    });
+
+    it('should apply function filter client-side (no knn.filter in query)', async () => {
+      const queryVector = [0.1, 0.2, 0.3];
+      const k = 5;
+      const filterFn = () => false;
+
+      const results = await vectorStore.similaritySearchVectorWithScore(queryVector, k, filterFn);
+
+      expect(vectorStore['collection'].query).toHaveBeenCalledWith({
+        size: k,
+        query: {
+          knn: {
+            field: 'vector',
+            queryVector,
+            k,
+          },
+        },
+        consistentRead: true,
+      });
+      expect(results).toHaveLength(0);
+    });
   });
 
   describe('similaritySearch', () => {

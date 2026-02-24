@@ -11,6 +11,7 @@ import {
   MaxMarginalRelevanceSearchOptions,
   CollectionInfo,
   RetryOptions,
+  type LambdaDBFilterObject,
 } from "./types.js";
 import {
   lambdaDBToDocument,
@@ -20,6 +21,7 @@ import {
   generateDocumentId,
   batchArray,
   withRetry,
+  toLambdaDBFilter,
   DEFAULT_RETRY_OPTIONS,
 } from "./utils.js";
 
@@ -27,7 +29,7 @@ import {
  * LambdaDB vector store implementation for LangChain
  */
 export class LambdaDBVectorStore extends VectorStore {
-  declare FilterType: DocumentFilter;
+  declare FilterType: DocumentFilter | LambdaDBFilterObject | string;
 
   private client: LambdaDBClient;
   private collection: ReturnType<LambdaDBClient["collection"]>;
@@ -141,43 +143,44 @@ export class LambdaDBVectorStore extends VectorStore {
   }
 
   /**
-   * Perform similarity search with scores
+   * Perform similarity search with scores.
+   * Filter: object or string → LambdaDB knn.filter (server-side). Function → applied client-side after fetch.
    */
   async similaritySearchVectorWithScore(
     query: number[],
     k: number,
-    filter?: DocumentFilter
+    filter?: DocumentFilter | LambdaDBFilterObject | string
   ): Promise<[Document, number][]> {
     try {
       validateVectorDimensions(query, this.config.vectorDimensions);
 
-      // Query LambdaDB for similar vectors using correct KNN API structure with retry
+      const apiFilter = toLambdaDBFilter(filter);
+      const knn: Record<string, unknown> = {
+        field: this.vectorField,
+        queryVector: query,
+        k,
+      };
+      if (apiFilter) {
+        knn.filter = apiFilter;
+      }
+
       const response = await withRetry(async () => {
         return await this.collection.query({
           size: k,
-          query: {
-            knn: {
-              field: this.vectorField,
-              queryVector: query,
-              k: k
-            }
-          },
+          query: { knn },
           consistentRead: this.config.defaultConsistentRead,
         });
       }, this.retryOptions);
 
-      // Convert results to LangChain format
       const formattedResults: [Document, number][] = response.docs.map((result) => {
         const doc = lambdaDBToDocument(result.doc, this.textField);
         const score = result.score || 0;
         return [doc, score];
       });
 
-      // Apply client-side filtering if needed
-      if (filter) {
-        return formattedResults.filter(([doc]) => filter(doc));
+      if (typeof filter === "function") {
+        return formattedResults.filter(([doc]) => (filter as DocumentFilter)(doc));
       }
-
       return formattedResults;
     } catch (error) {
       throw handleLambdaDBError(error);
@@ -190,7 +193,7 @@ export class LambdaDBVectorStore extends VectorStore {
   async similaritySearch(
     query: string,
     k = 4,
-    filter?: DocumentFilter
+    filter?: DocumentFilter | LambdaDBFilterObject | string
   ): Promise<Document[]> {
     const embeddings = await this.embeddings.embedQuery(query);
     const results = await this.similaritySearchVectorWithScore(embeddings, k, filter);
@@ -332,12 +335,10 @@ export class LambdaDBVectorStore extends VectorStore {
             await this.deleteDocuments({ ids: idsToDelete });
           }
         } else {
-          // LambdaDB filter (object or query string): pass to API for server-side delete
-          const apiFilter =
-            typeof options.filter === "string"
-              ? { queryString: { query: options.filter } }
-              : (options.filter as Record<string, unknown>);
-          await this.collection.docs.delete({ filter: apiFilter });
+          const apiFilter = toLambdaDBFilter(options.filter);
+          if (apiFilter) {
+            await this.collection.docs.delete({ filter: apiFilter });
+          }
         }
       } else {
         throw new Error("Must provide either ids, filter, or deleteAll option");
@@ -363,16 +364,11 @@ export class LambdaDBVectorStore extends VectorStore {
     } = options;
 
     try {
-      // Convert filter to function if needed
-      const filterFn: DocumentFilter | undefined = typeof filter === 'function' 
-        ? filter as DocumentFilter 
-        : undefined;
-
-      // First, get more candidates than needed
+      // Pass filter as-is: object/string → server knn.filter, function → client-side in similaritySearchVectorWithScore
       const candidateResults = await this.similaritySearchVectorWithScore(
         await this.embeddings.embedQuery(query),
         fetchK,
-        filterFn
+        filter as DocumentFilter | LambdaDBFilterObject | string | undefined
       );
 
       if (candidateResults.length === 0) {

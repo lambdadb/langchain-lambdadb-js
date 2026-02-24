@@ -1,5 +1,5 @@
 import { Document } from "@langchain/core/documents";
-import { LambdaDBDocument, SimilaritySearchResult } from "./types.js";
+import { LambdaDBDocument, SimilaritySearchResult, type LambdaDBFilterObject } from "./types.js";
 
 /**
  * Convert LangChain Document to LambdaDB document format
@@ -285,4 +285,23 @@ export function batchArray<T>(array: T[], batchSize: number): T[][] {
     batches.push(array.slice(i, i + batchSize));
   }
   return batches;
+}
+
+/**
+ * Convert a filter (string, LambdaDB object, or function) to LambdaDB API filter for query/delete.
+ * Used for server-side filtering in search (knn.filter) and delete (docs.delete filter).
+ *
+ * @param filter - Query string (e.g. "field:value"), LambdaDB filter object (e.g. { queryString: { query: "..." } }), or function (client-side only).
+ * @returns LambdaDB filter object for API, or undefined when filter is a function or null/undefined.
+ * @see https://docs.lambdadb.ai/guides/search/query-string
+ * @see https://docs.lambdadb.ai/guides/documents/delete-data
+ */
+export function toLambdaDBFilter(
+  filter: ((doc: Document) => boolean) | LambdaDBFilterObject | string | undefined | null
+): LambdaDBFilterObject | undefined {
+  if (filter == null) return undefined;
+  if (typeof filter === "function") return undefined;
+  if (typeof filter === "string") return { queryString: { query: filter } };
+  if (typeof filter === "object" && filter !== null) return filter as LambdaDBFilterObject;
+  return undefined;
 }
