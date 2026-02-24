@@ -84,12 +84,15 @@ console.log(results);
 | `collectionName` | `string` | ✅ | Name of the collection to use |
 | `vectorDimensions` | `number` | ✅ | Vector dimensions for embeddings |
 | `similarityMetric` | `SimilarityMetric` | ❌ | Similarity metric (default: 'cosine') |
-| `serverURL` | `string` | ❌ | Custom LambdaDB server URL (note: serverURL not serverUrl) |
+| `baseUrl` | `string` | ❌ | API base URL (e.g. https://api.lambdadb.ai). Preferred with `projectName`. |
+| `projectName` | `string` | ❌ | Project name (path under /projects/). Preferred with `baseUrl`. |
+| `serverURL` | `string` | ❌ | **Deprecated.** Full server URL override. Prefer `baseUrl` + `projectName`. |
 | `textField` | `string` | ❌ | Field name for document content (default: 'content') |
 | `vectorField` | `string` | ❌ | Field name for vectors (default: 'vector') |
 | `validateCollection` | `boolean` | ❌ | Validate collection before operations (default: false) |
 | `defaultConsistentRead` | `boolean` | ❌ | Use consistent reads by default (default: true) |
 | `retryOptions` | `RetryOptions` | ❌ | Configure retry behavior with exponential backoff |
+| `partitionConfig` | `PartitionConfigOption` | ❌ | Optional partition config for collection creation |
 
 ### Similarity Metrics
 
@@ -271,11 +274,11 @@ new LambdaDBVectorStore(embeddings: EmbeddingsInterface, config: LambdaDBConfig)
 
 #### Methods
 
-##### `addDocuments(documents: Document[]): Promise<void>`
-Adds documents to the vector store with automatic embedding generation.
+##### `addDocuments(documents: Document[]): Promise<string[] \| void>`
+Adds documents to the vector store with automatic embedding generation. Returns assigned document IDs.
 
-##### `addVectors(vectors: number[][], documents: Document[]): Promise<void>`
-Adds pre-computed vectors with associated documents.
+##### `addVectors(vectors: number[][], documents: Document[]): Promise<string[] \| void>`
+Adds pre-computed vectors with associated documents. Returns assigned document IDs.
 
 ##### `similaritySearch(query: string, k?: number, filter?: DocumentFilter): Promise<Document[]>`
 Performs similarity search with a text query.
@@ -284,7 +287,7 @@ Performs similarity search with a text query.
 Performs similarity search with a vector query, returns documents with similarity scores. **Filter**: string or LambdaDB object → server-side `knn.filter`; function → client-side filter after fetch.
 
 ##### `maxMarginalRelevanceSearch(query: string, options?: MMRSearchOptions): Promise<Document[]>`
-Performs Max Marginal Relevance search for diverse results balancing relevance and diversity.
+Performs MMR search using vector similarity: fetches candidates with `includeVectors: true` and balances relevance to the query with diversity among selected documents (cosine similarity).
 
 ##### `createCollection(options?: Partial<CreateCollectionOptions>): Promise<void>`
 Creates a new collection in LambdaDB with proper state monitoring.
@@ -391,14 +394,16 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - **Error Handling**: Comprehensive error handling with retry logic and exponential backoff
 - **Field Name Configuration**: Supports custom field names for text and vector data
 - **Batch Processing**: Efficient bulk operations with proper error handling
-- **Test Coverage**: 43 tests covering all functionality including edge cases
+- **MMR**: Vector-based MMR with `includeVectors: true` and cosine similarity for relevance/diversity balance
+- **Client options**: Prefer `baseUrl` + `projectName`; `serverURL` supported but deprecated
+- **Test Coverage**: Unit and integration tests covering core functionality and edge cases
 
 ### LambdaDB Integration Notes
 
 - Uses KNN query format: `{ knn: { field, queryVector, k } }`
-- Requires exact parameter name `serverURL` (not `serverUrl`)
+- Prefer `baseUrl` + `projectName`; use `serverURL` (exact name, not `serverUrl`) only if overriding full URL
 - Supports immediate consistency with `consistentRead: true`
-- Collection creation includes state polling until ACTIVE
+- Collection creation includes state polling until ACTIVE; optional `partitionConfig` supported
 - **Delete**: Prefer server-side filter (`filter` as string or LambdaDB object) for efficiency; `deleteAll: true` uses LambdaDB filter `{ queryString: { query: "*:*" } }`. [Delete data](https://docs.lambdadb.ai/guides/documents/delete-data)
 
 ## Links

@@ -22,9 +22,13 @@ const mockCollectionHandle = {
       {
         collection: 'test-collection',
         score: 0.95,
-        doc: { content: 'Test document content', metadata: { source: 'test' } }
-      }
-    ]
+        doc: {
+          content: 'Test document content',
+          metadata: { source: 'test' },
+          vector: [0.1, 0.2, 0.3],
+        },
+      },
+    ],
   }),
   docs: {
     upsert: vi.fn().mockResolvedValue({}),
@@ -102,15 +106,19 @@ describe('LambdaDBVectorStore', () => {
   });
 
   describe('addVectors', () => {
-    it('should add vectors with documents', async () => {
+    it('should add vectors with documents and return assigned ids', async () => {
       const vectors = [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]];
       const documents = [
         new Document({ pageContent: 'Document 1', metadata: { id: '1' } }),
         new Document({ pageContent: 'Document 2', metadata: { id: '2' } }),
       ];
 
-      await vectorStore.addVectors(vectors, documents);
+      const ids = await vectorStore.addVectors(vectors, documents);
 
+      expect(ids).toBeDefined();
+      expect(Array.isArray(ids)).toBe(true);
+      expect(ids).toHaveLength(2);
+      expect(ids!.every((id) => typeof id === 'string')).toBe(true);
       expect(vectorStore['collection'].docs.upsert).toHaveBeenCalledWith({
         docs: expect.arrayContaining([
           expect.objectContaining({
@@ -288,6 +296,9 @@ describe('LambdaDBVectorStore', () => {
       const results = await vectorStore.maxMarginalRelevanceSearch(query, options);
 
       expect(mockEmbeddings.embedQuery).toHaveBeenCalledWith(query);
+      expect(vectorStore['collection'].query).toHaveBeenCalledWith(
+        expect.objectContaining({ includeVectors: true })
+      );
       expect(results).toHaveLength(1);
       expect(results[0]).toBeInstanceOf(Document);
     }, 10000);

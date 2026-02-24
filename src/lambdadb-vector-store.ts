@@ -1,6 +1,7 @@
 import { VectorStore } from "@langchain/core/vectorstores";
 import { Document } from "@langchain/core/documents";
 import { EmbeddingsInterface } from "@langchain/core/embeddings";
+import { maximalMarginalRelevance } from "@langchain/core/utils/math";
 import { LambdaDBClient } from "@functional-systems/lambdadb";
 
 import {
@@ -56,11 +57,13 @@ export class LambdaDBVectorStore extends VectorStore {
     this.vectorField = this.config.vectorField!;
     this.retryOptions = { ...DEFAULT_RETRY_OPTIONS, ...(config.retryOptions || {}) };
     
-    // Initialize LambdaDB client (0.3.x SDK: LambdaDBClient with collection-scoped API)
+    // Initialize LambdaDB client (0.3.x SDK). Prefer baseUrl + projectName; serverURL supported for backward compatibility.
     this.client = new LambdaDBClient({
       projectApiKey: config.projectApiKey,
+      ...(config.baseUrl && { baseUrl: config.baseUrl }),
+      ...(config.projectName && { projectName: config.projectName }),
       ...(config.serverURL && { serverURL: config.serverURL }),
-      timeoutMs: 30000, // 30 second timeout for all operations
+      timeoutMs: 30000,
     });
     this.collection = this.client.collection(this.config.collectionName);
     
@@ -80,63 +83,53 @@ export class LambdaDBVectorStore extends VectorStore {
   }
 
   /**
-   * Add documents to the vector store
+   * Add documents to the vector store. Returns document IDs when provided by the store.
    */
-  async addDocuments(documents: Document[]): Promise<void> {
+  async addDocuments(documents: Document[]): Promise<string[] | void> {
     try {
-      // Handle empty document array
       if (documents.length === 0) {
-        return;
+        return [];
       }
-
       const texts = documents.map(({ pageContent }) => pageContent);
       const embeddings = await this.embeddings.embedDocuments(texts);
-      
-      await this.addVectors(embeddings, documents);
+      return this.addVectors(embeddings, documents);
     } catch (error) {
       throw handleLambdaDBError(error);
     }
   }
 
   /**
-   * Add vectors with associated documents to the store
+   * Add vectors with associated documents to the store. Returns the assigned document IDs.
    */
-  async addVectors(vectors: number[][], documents: Document[]): Promise<void> {
+  async addVectors(vectors: number[][], documents: Document[]): Promise<string[] | void> {
     try {
-      // Validate input lengths match
       if (vectors.length !== documents.length) {
         throw new Error("Vectors and documents length mismatch");
       }
-
-      // Validate vector dimensions
       if (vectors.length > 0) {
         validateVectorDimensions(vectors[0], this.config.vectorDimensions);
       }
-
-      // Ensure collection exists
       await this.ensureCollectionExists();
 
-      // Convert documents to LambdaDB format using configurable field names
       const lambdaDBDocs = vectors.map((vector, idx) => {
         const doc = documents[idx];
-        const docData: Record<string, any> = {
-          id: generateDocumentId(), // Use regular id field  
+        const id = generateDocumentId();
+        return {
+          id,
           [this.textField]: doc.pageContent,
           [this.vectorField]: vector,
           ...doc.metadata,
-        };
-        return docData;
+        } as Record<string, unknown>;
       });
 
-      // Batch upsert documents using correct API structure
-      const batchSize = 100; // Adjust based on LambdaDB limits
+      const batchSize = 100;
       const batches = batchArray(lambdaDBDocs, batchSize);
-
       for (const batch of batches) {
         await withRetry(async () => {
           await this.collection.docs.upsert({ docs: batch });
         }, this.retryOptions);
       }
+      return lambdaDBDocs.map((d) => d.id as string);
     } catch (error) {
       throw handleLambdaDBError(error);
     }
@@ -218,6 +211,9 @@ export class LambdaDBVectorStore extends VectorStore {
             ...(this.config.indexConfig || {}),
             ...(options?.indexConfig || {}),
           },
+          ...(this.config.partitionConfig || options?.partitionConfig
+            ? { partitionConfig: options?.partitionConfig ?? this.config.partitionConfig }
+            : {}),
         });
       }, this.retryOptions);
 
@@ -349,74 +345,62 @@ export class LambdaDBVectorStore extends VectorStore {
   }
 
   /**
-   * Maximum marginal relevance search
+   * Maximum marginal relevance search: balances relevance to the query with diversity among results.
+   * Fetches candidates with includeVectors: true and computes MMR using vector similarity.
    */
   async maxMarginalRelevanceSearch(
     query: string,
     options: MaxMarginalRelevanceSearchOptions,
     _callbacks?: any
   ): Promise<Document[]> {
-    const {
-      k = 4,
-      fetchK = 20,
-      lambda = 0.5,
-      filter,
-    } = options;
+    const { k = 4, fetchK = 20, lambda = 0.5, filter } = options;
 
     try {
-      // Pass filter as-is: object/string → server knn.filter, function → client-side in similaritySearchVectorWithScore
-      const candidateResults = await this.similaritySearchVectorWithScore(
-        await this.embeddings.embedQuery(query),
-        fetchK,
+      const queryVector = await this.embeddings.embedQuery(query);
+      validateVectorDimensions(queryVector, this.config.vectorDimensions);
+
+      const apiFilter = toLambdaDBFilter(
         filter as DocumentFilter | LambdaDBFilterObject | string | undefined
       );
-
-      if (candidateResults.length === 0) {
-        return [];
+      const knn: Record<string, unknown> = {
+        field: this.vectorField,
+        queryVector,
+        k: fetchK,
+      };
+      if (apiFilter) {
+        knn.filter = apiFilter;
       }
 
-      // Extract embeddings for MMR calculation (this would require storing vectors)
-      // For now, we'll implement a simplified version that just returns top-k results
-      // A full MMR implementation would require vector storage and access
-      const selected: Document[] = [];
-      const candidates = candidateResults.map(([doc]) => doc);
+      const response = await withRetry(async () => {
+        return await this.collection.query({
+          size: fetchK,
+          query: { knn },
+          consistentRead: this.config.defaultConsistentRead,
+          includeVectors: true,
+        });
+      }, this.retryOptions);
 
-      // Select first document (highest similarity)
-      if (candidates.length > 0) {
-        selected.push(candidates[0]);
+      const candidates: { doc: Document; score: number; vector: number[] }[] = [];
+      for (const result of response.docs ?? []) {
+        const rawDoc = result.doc ?? result;
+        const vector = rawDoc[this.vectorField];
+        if (!Array.isArray(vector) || vector.length === 0) continue;
+        const doc = lambdaDBToDocument(rawDoc as Record<string, unknown>, this.textField);
+        const score = typeof result.score === "number" ? result.score : 0;
+        candidates.push({ doc, score, vector });
       }
 
-      // For remaining selections, balance relevance and diversity
-      // This is a simplified MMR - a full implementation would calculate
-      // vector similarities between candidates
-      while (selected.length < k && selected.length < candidates.length) {
-        let bestIdx = -1;
-        let bestScore = -Infinity;
+      if (candidates.length === 0) return [];
 
-        for (let i = 0; i < candidates.length; i++) {
-          const candidate = candidates[i];
-          if (selected.includes(candidate)) continue;
+      const applyClientFilter = typeof filter === "function";
+      const list = applyClientFilter
+        ? candidates.filter((c) => (filter as DocumentFilter)(c.doc))
+        : candidates;
+      if (list.length === 0) return [];
 
-          // Simplified scoring: favor later results (more diverse)
-          // In full MMR, this would be: lambda * similarity - (1-lambda) * max_similarity_to_selected
-          const diversityBonus = (1 - lambda) * (i / candidates.length);
-          const relevanceScore = lambda * (1 - i / candidates.length);
-          const score = relevanceScore + diversityBonus;
-
-          if (score > bestScore) {
-            bestScore = score;
-            bestIdx = i;
-          }
-        }
-
-        if (bestIdx >= 0) {
-          selected.push(candidates[bestIdx]);
-        } else {
-          break;
-        }
-      }
-
-      return selected.slice(0, k);
+      const embeddingList = list.map((c) => c.vector);
+      const selectedIndexes = maximalMarginalRelevance(queryVector, embeddingList, lambda, k);
+      return selectedIndexes.map((i) => list[i].doc);
     } catch (error) {
       throw handleLambdaDBError(error);
     }

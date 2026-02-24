@@ -2,6 +2,7 @@ export { LambdaDBVectorStore } from "./lambdadb-vector-store.js";
 export type {
   LambdaDBConfig,
   SimilarityMetric,
+  PartitionConfigOption,
   CreateCollectionOptions,
   SimilaritySearchOptions,
   SimilaritySearchResult,
@@ -25,6 +26,7 @@ export {
   batchArray,
   withRetry,
   toLambdaDBFilter,
+  cosineSimilarity,
   DEFAULT_RETRY_OPTIONS,
   LambdaDBConnectionError,
   LambdaDBAuthenticationError,

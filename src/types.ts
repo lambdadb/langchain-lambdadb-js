@@ -16,13 +16,33 @@ export interface RetryOptions {
  */
 export type SimilarityMetric = 'cosine' | 'euclidean' | 'dot_product' | 'max_inner_product';
 
+/** Partition config for collection (LambdaDB API). Optional; for future use. */
+export interface PartitionConfigOption {
+  fieldName?: string;
+  dataType?: "keyword";
+  numPartitions?: number;
+}
+
 /**
  * Configuration options for LambdaDB vector store
  */
 export interface LambdaDBConfig {
   /** LambdaDB project API key */
   projectApiKey: string;
-  /** Custom server URL (optional) */
+  /**
+   * API base URL (e.g. https://api.lambdadb.ai). Preferred with projectName.
+   * @see https://github.com/lambdadb/lambdadb-typescript-client
+   */
+  baseUrl?: string;
+  /**
+   * Project name (path segment under /projects/). Preferred with baseUrl.
+   * @see https://github.com/lambdadb/lambdadb-typescript-client
+   */
+  projectName?: string;
+  /**
+   * Custom server URL (optional). Full base URL override.
+   * @deprecated Prefer baseUrl + projectName. Kept for backward compatibility.
+   */
   serverURL?: string;
   /** Name of the collection to use */
   collectionName: string;
@@ -42,6 +62,8 @@ export interface LambdaDBConfig {
   defaultConsistentRead?: boolean;
   /** Retry configuration for failed operations */
   retryOptions?: Partial<RetryOptions>;
+  /** Optional partition config for collection creation (future use) */
+  partitionConfig?: PartitionConfigOption;
 }
 
 /**
@@ -57,6 +79,8 @@ export interface CreateCollectionOptions {
   };
   /** Additional index configuration */
   indexConfig?: Record<string, any>;
+  /** Optional partition config (LambdaDB API) */
+  partitionConfig?: PartitionConfigOption;
 }
 
 /**
