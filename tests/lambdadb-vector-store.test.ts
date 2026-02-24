@@ -4,44 +4,40 @@ import { LambdaDBConfig } from '../src/types.js';
 import { Document } from '@langchain/core/documents';
 import { EmbeddingsInterface } from '@langchain/core/embeddings';
 
-// Mock LambdaDB client
-vi.mock('@functional-systems/lambdadb', () => ({
-  LambdaDB: vi.fn().mockImplementation(() => ({
-    collections: {
-      list: vi.fn().mockResolvedValue({ collections: [] }),
-      create: vi.fn().mockResolvedValue({}),
-      delete: vi.fn().mockResolvedValue({}),
-      get: vi.fn().mockResolvedValue({
-        collection: {
-          collectionName: 'test-collection',
-          collectionStatus: 'ACTIVE', // Mock collection as ACTIVE to prevent waiting
-          numDocs: 0,
-          indexConfigs: {
-            vector: {
-              type: 'vector',
-              dimensions: 3,
-              similarity: 'cosine'
-            }
-          }
-        }
-      }),
-      query: vi.fn().mockResolvedValue({
-        docs: [
-          {
-            collection: 'test-collection',
-            score: 0.95,
-            doc: {
-              content: 'Test document content',
-              metadata: { source: 'test' }
-            }
-          }
-        ]
-      }),
-      docs: {
-        upsert: vi.fn().mockResolvedValue({}),
+// Mock LambdaDB 0.3.x client (LambdaDBClient + CollectionHandle)
+const mockCollectionHandle = {
+  get: vi.fn().mockResolvedValue({
+    collection: {
+      collectionName: 'test-collection',
+      collectionStatus: 'ACTIVE',
+      numDocs: 0,
+      indexConfigs: {
+        vector: { type: 'vector', dimensions: 3, similarity: 'cosine' }
       }
     }
-  }))
+  }),
+  delete: vi.fn().mockResolvedValue({}),
+  query: vi.fn().mockResolvedValue({
+    docs: [
+      {
+        collection: 'test-collection',
+        score: 0.95,
+        doc: { content: 'Test document content', metadata: { source: 'test' } }
+      }
+    ]
+  }),
+  docs: {
+    upsert: vi.fn().mockResolvedValue({}),
+    delete: vi.fn().mockResolvedValue({}),
+  }
+};
+
+vi.mock('@functional-systems/lambdadb', () => ({
+  LambdaDBClient: vi.fn().mockImplementation(() => ({
+    collection: vi.fn().mockReturnValue(mockCollectionHandle),
+    createCollection: vi.fn().mockResolvedValue({}),
+    listCollections: vi.fn().mockResolvedValue({ collections: [] }),
+  })),
 }));
 
 // Mock embeddings interface
@@ -95,7 +91,7 @@ describe('LambdaDBVectorStore', () => {
       await vectorStore.addDocuments(documents);
 
       expect(mockEmbeddings.embedDocuments).toHaveBeenCalledWith(['Document 1', 'Document 2']);
-      expect(vectorStore['client'].collections.docs.upsert).toHaveBeenCalled();
+      expect(vectorStore['collection'].docs.upsert).toHaveBeenCalled();
     }, 10000);
 
     it('should handle empty document array', async () => {
@@ -114,17 +110,14 @@ describe('LambdaDBVectorStore', () => {
 
       await vectorStore.addVectors(vectors, documents);
 
-      expect(vectorStore['client'].collections.docs.upsert).toHaveBeenCalledWith({
-        collectionName: 'test-collection',
-        requestBody: {
-          docs: expect.arrayContaining([
-            expect.objectContaining({
-              content: 'Document 1',
-              vector: [0.1, 0.2, 0.3], // Updated to use 'vector' field
-              id: '1' // metadata is now spread into the document  
-            })
-          ])
-        }
+      expect(vectorStore['collection'].docs.upsert).toHaveBeenCalledWith({
+        docs: expect.arrayContaining([
+          expect.objectContaining({
+            content: 'Document 1',
+            vector: [0.1, 0.2, 0.3],
+            id: '1'
+          })
+        ])
       });
     }, 10000);
 
@@ -148,19 +141,16 @@ describe('LambdaDBVectorStore', () => {
 
       const results = await vectorStore.similaritySearchVectorWithScore(queryVector, k);
 
-      expect(vectorStore['client'].collections.query).toHaveBeenCalledWith({
-        collectionName: 'test-collection',
-        requestBody: {
-          size: k,
-          query: {
-            knn: {
-              field: "vector", // Updated to use 'vector' field
-              queryVector: queryVector,
-              k: k
-            }
-          },
-          consistentRead: true, // Updated default value
-        }
+      expect(vectorStore['collection'].query).toHaveBeenCalledWith({
+        size: k,
+        query: {
+          knn: {
+            field: 'vector',
+            queryVector: queryVector,
+            k: k
+          }
+        },
+        consistentRead: true,
       });
 
       expect(results).toHaveLength(1);
@@ -250,10 +240,7 @@ describe('LambdaDBVectorStore', () => {
     }, 10000);
 
     it('should handle empty MMR results', async () => {
-      // Mock empty response
-      vectorStore['client'].collections.query = vi.fn().mockResolvedValue({
-        docs: []
-      });
+      mockCollectionHandle.query.mockResolvedValueOnce({ docs: [] });
 
       const query = 'test query';
       const options = { k: 3 };
@@ -268,10 +255,10 @@ describe('LambdaDBVectorStore', () => {
     it('should create collection with correct configuration', async () => {
       await vectorStore.createCollection();
 
-      expect(vectorStore['client'].collections.create).toHaveBeenCalledWith({
+      expect(vectorStore['client'].createCollection).toHaveBeenCalledWith({
         collectionName: 'test-collection',
         indexConfigs: {
-          vector: {  // Updated to use 'vector' field
+          vector: {
             type: 'vector',
             dimensions: 3,
             similarity: 'cosine',
@@ -283,9 +270,7 @@ describe('LambdaDBVectorStore', () => {
     it('should delete collection', async () => {
       await vectorStore.deleteCollection();
 
-      expect(vectorStore['client'].collections.delete).toHaveBeenCalledWith({
-        collectionName: 'test-collection'
-      });
+      expect(vectorStore['collection'].delete).toHaveBeenCalledWith();
     });
   });
 });

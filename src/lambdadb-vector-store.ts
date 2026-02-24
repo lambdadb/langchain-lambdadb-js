@@ -1,7 +1,7 @@
 import { VectorStore } from "@langchain/core/vectorstores";
 import { Document } from "@langchain/core/documents";
 import { EmbeddingsInterface } from "@langchain/core/embeddings";
-import { LambdaDB } from "@functional-systems/lambdadb";
+import { LambdaDBClient } from "@functional-systems/lambdadb";
 
 import {
   LambdaDBConfig,
@@ -29,7 +29,8 @@ import {
 export class LambdaDBVectorStore extends VectorStore {
   declare FilterType: DocumentFilter;
 
-  private client: LambdaDB;
+  private client: LambdaDBClient;
+  private collection: ReturnType<LambdaDBClient["collection"]>;
   private config: LambdaDBConfig;
   private textField: string;
   private vectorField: string;
@@ -53,12 +54,13 @@ export class LambdaDBVectorStore extends VectorStore {
     this.vectorField = this.config.vectorField!;
     this.retryOptions = { ...DEFAULT_RETRY_OPTIONS, ...(config.retryOptions || {}) };
     
-    // Initialize LambdaDB client
-    this.client = new LambdaDB({
+    // Initialize LambdaDB client (0.3.x SDK: LambdaDBClient with collection-scoped API)
+    this.client = new LambdaDBClient({
       projectApiKey: config.projectApiKey,
       ...(config.serverURL && { serverURL: config.serverURL }),
       timeoutMs: 30000, // 30 second timeout for all operations
     });
+    this.collection = this.client.collection(this.config.collectionName);
     
     // Validate collection exists if requested
     if (this.config.validateCollection) {
@@ -130,12 +132,7 @@ export class LambdaDBVectorStore extends VectorStore {
 
       for (const batch of batches) {
         await withRetry(async () => {
-          await this.client.collections.docs.upsert({
-            collectionName: this.config.collectionName,
-            requestBody: {
-              docs: batch,
-            },
-          });
+          await this.collection.docs.upsert({ docs: batch });
         }, this.retryOptions);
       }
     } catch (error) {
@@ -156,20 +153,16 @@ export class LambdaDBVectorStore extends VectorStore {
 
       // Query LambdaDB for similar vectors using correct KNN API structure with retry
       const response = await withRetry(async () => {
-        return await this.client.collections.query({
-          collectionName: this.config.collectionName,
-          requestBody: {
-            size: k,
-            query: {
-              knn: {
-                field: this.vectorField,
-                queryVector: query,
-                k: k
-              }
-            },
-            consistentRead: this.config.defaultConsistentRead,
-            // Add filter support if LambdaDB supports it in the future
+        return await this.collection.query({
+          size: k,
+          query: {
+            knn: {
+              field: this.vectorField,
+              queryVector: query,
+              k: k
+            }
           },
+          consistentRead: this.config.defaultConsistentRead,
         });
       }, this.retryOptions);
 
@@ -209,18 +202,16 @@ export class LambdaDBVectorStore extends VectorStore {
    */
   async createCollection(options?: Partial<CreateCollectionOptions>): Promise<void> {
     try {
-      // Create collection with proper index configuration using LambdaDB types with retry
+      // Create collection with proper index configuration (0.3.x: createCollection takes request body)
       await withRetry(async () => {
-        await this.client.collections.create({
+        await this.client.createCollection({
           collectionName: this.config.collectionName,
           indexConfigs: {
-            // Vector index configuration for the embedding field
             [this.vectorField]: {
               type: "vector" as const,
               dimensions: this.config.vectorDimensions,
               similarity: (this.config.similarityMetric?.toLowerCase() || "cosine") as "cosine" | "euclidean" | "dot_product" | "max_inner_product",
             },
-            // Add other index configurations if provided
             ...(this.config.indexConfig || {}),
             ...(options?.indexConfig || {}),
           },
@@ -274,9 +265,7 @@ export class LambdaDBVectorStore extends VectorStore {
    */
   async deleteCollection(): Promise<void> {
     try {
-      await this.client.collections.delete({
-        collectionName: this.config.collectionName,
-      });
+      await this.collection.delete();
     } catch (error) {
       throw handleLambdaDBError(error);
     }
@@ -300,12 +289,7 @@ export class LambdaDBVectorStore extends VectorStore {
         }
       } else if (options.ids && options.ids.length > 0) {
         // Delete documents by IDs
-        await this.client.collections.docs.delete({
-          collectionName: this.config.collectionName,
-          requestBody: {
-            ids: options.ids,
-          },
-        });
+        await this.collection.docs.delete({ ids: options.ids });
       } else if (options.filter) {
         // For filter-based deletion, we need to first find matching documents
         // This is a two-step process: search then delete
@@ -410,16 +394,14 @@ export class LambdaDBVectorStore extends VectorStore {
    */
   async getCollectionInfo(): Promise<CollectionInfo> {
     try {
-      const response = await this.client.collections.get({
-        collectionName: this.config.collectionName,
-      });
+      const response = await this.collection.get();
+      const col = response.collection;
 
       return {
-        name: response.collection.collectionName || this.config.collectionName,
-        status: response.collection.collectionStatus || "unknown",
-        documentCount: response.collection.numDocs,
-        indexConfigs: response.collection.indexConfigs,
-        // These fields might not be available in the current API
+        name: col.collectionName ?? this.config.collectionName,
+        status: col.collectionStatus ?? "unknown",
+        documentCount: col.numDocs,
+        indexConfigs: col.indexConfigs,
         createdAt: undefined,
         updatedAt: undefined,
       };
@@ -463,9 +445,7 @@ export class LambdaDBVectorStore extends VectorStore {
    */
   private async validateCollectionExists(): Promise<void> {
     try {
-      await this.client.collections.get({
-        collectionName: this.config.collectionName,
-      });
+      await this.collection.get();
     } catch (error) {
       throw new Error(`Collection '${this.config.collectionName}' does not exist: ${error}`);
     }
@@ -492,22 +472,19 @@ export class LambdaDBVectorStore extends VectorStore {
    */
   private async ensureCollectionExists(): Promise<void> {
     try {
-      // Try to get collection info
-      const response = await this.client.collections.list();
-      const collectionExists = response.collections && response.collections.some(
-        (collection: any) => collection.name === this.config.collectionName
+      const response = await this.client.listCollections();
+      const collectionExists = response.collections?.some(
+        (c: { collectionName: string }) => c.collectionName === this.config.collectionName
       );
 
       if (!collectionExists) {
         await this.createCollection();
       }
     } catch (error) {
-      // If getting collection info fails, try creating it
       try {
         await this.createCollection();
       } catch (createError) {
-        // If creation also fails, the collection might already exist
-        // This is a common race condition, so we can ignore it
+        // Collection might already exist (race condition)
       }
     }
   }
