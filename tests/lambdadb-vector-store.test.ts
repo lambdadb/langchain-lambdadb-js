@@ -4,44 +4,45 @@ import { LambdaDBConfig } from '../src/types.js';
 import { Document } from '@langchain/core/documents';
 import { EmbeddingsInterface } from '@langchain/core/embeddings';
 
-// Mock LambdaDB client
-vi.mock('@functional-systems/lambdadb', () => ({
-  LambdaDB: vi.fn().mockImplementation(() => ({
-    collections: {
-      list: vi.fn().mockResolvedValue({ collections: [] }),
-      create: vi.fn().mockResolvedValue({}),
-      delete: vi.fn().mockResolvedValue({}),
-      get: vi.fn().mockResolvedValue({
-        collection: {
-          collectionName: 'test-collection',
-          collectionStatus: 'ACTIVE', // Mock collection as ACTIVE to prevent waiting
-          numDocs: 0,
-          indexConfigs: {
-            vector: {
-              type: 'vector',
-              dimensions: 3,
-              similarity: 'cosine'
-            }
-          }
-        }
-      }),
-      query: vi.fn().mockResolvedValue({
-        docs: [
-          {
-            collection: 'test-collection',
-            score: 0.95,
-            doc: {
-              content: 'Test document content',
-              metadata: { source: 'test' }
-            }
-          }
-        ]
-      }),
-      docs: {
-        upsert: vi.fn().mockResolvedValue({}),
+// Mock LambdaDB 0.3.x client (LambdaDBClient + CollectionHandle)
+const mockCollectionHandle = {
+  get: vi.fn().mockResolvedValue({
+    collection: {
+      collectionName: 'test-collection',
+      collectionStatus: 'ACTIVE',
+      numDocs: 0,
+      indexConfigs: {
+        vector: { type: 'vector', dimensions: 3, similarity: 'cosine' }
       }
     }
-  }))
+  }),
+  delete: vi.fn().mockResolvedValue({}),
+  query: vi.fn().mockResolvedValue({
+    docs: [
+      {
+        collection: 'test-collection',
+        score: 0.95,
+        doc: {
+          content: 'Test document content',
+          metadata: { source: 'test' },
+          vector: [0.1, 0.2, 0.3],
+        },
+      },
+    ],
+  }),
+  docs: {
+    upsert: vi.fn().mockResolvedValue({}),
+    delete: vi.fn().mockResolvedValue({}),
+    listAll: vi.fn().mockResolvedValue({ docs: [], total: 0 }),
+  }
+};
+
+vi.mock('@functional-systems/lambdadb', () => ({
+  LambdaDBClient: vi.fn().mockImplementation(() => ({
+    collection: vi.fn().mockReturnValue(mockCollectionHandle),
+    createCollection: vi.fn().mockResolvedValue({}),
+    listCollections: vi.fn().mockResolvedValue({ collections: [] }),
+  })),
 }));
 
 // Mock embeddings interface
@@ -95,7 +96,7 @@ describe('LambdaDBVectorStore', () => {
       await vectorStore.addDocuments(documents);
 
       expect(mockEmbeddings.embedDocuments).toHaveBeenCalledWith(['Document 1', 'Document 2']);
-      expect(vectorStore['client'].collections.docs.upsert).toHaveBeenCalled();
+      expect(vectorStore['collection'].docs.upsert).toHaveBeenCalled();
     }, 10000);
 
     it('should handle empty document array', async () => {
@@ -105,26 +106,27 @@ describe('LambdaDBVectorStore', () => {
   });
 
   describe('addVectors', () => {
-    it('should add vectors with documents', async () => {
+    it('should add vectors with documents and return assigned ids', async () => {
       const vectors = [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]];
       const documents = [
         new Document({ pageContent: 'Document 1', metadata: { id: '1' } }),
         new Document({ pageContent: 'Document 2', metadata: { id: '2' } }),
       ];
 
-      await vectorStore.addVectors(vectors, documents);
+      const ids = await vectorStore.addVectors(vectors, documents);
 
-      expect(vectorStore['client'].collections.docs.upsert).toHaveBeenCalledWith({
-        collectionName: 'test-collection',
-        requestBody: {
-          docs: expect.arrayContaining([
-            expect.objectContaining({
-              content: 'Document 1',
-              vector: [0.1, 0.2, 0.3], // Updated to use 'vector' field
-              id: '1' // metadata is now spread into the document  
-            })
-          ])
-        }
+      expect(ids).toBeDefined();
+      expect(Array.isArray(ids)).toBe(true);
+      expect(ids).toHaveLength(2);
+      expect(ids!.every((id) => typeof id === 'string')).toBe(true);
+      expect(vectorStore['collection'].docs.upsert).toHaveBeenCalledWith({
+        docs: expect.arrayContaining([
+          expect.objectContaining({
+            content: 'Document 1',
+            vector: [0.1, 0.2, 0.3],
+            id: '1'
+          })
+        ])
       });
     }, 10000);
 
@@ -148,19 +150,16 @@ describe('LambdaDBVectorStore', () => {
 
       const results = await vectorStore.similaritySearchVectorWithScore(queryVector, k);
 
-      expect(vectorStore['client'].collections.query).toHaveBeenCalledWith({
-        collectionName: 'test-collection',
-        requestBody: {
-          size: k,
-          query: {
-            knn: {
-              field: "vector", // Updated to use 'vector' field
-              queryVector: queryVector,
-              k: k
-            }
-          },
-          consistentRead: true, // Updated default value
-        }
+      expect(vectorStore['collection'].query).toHaveBeenCalledWith({
+        size: k,
+        query: {
+          knn: {
+            field: 'vector',
+            queryVector: queryVector,
+            k: k
+          }
+        },
+        consistentRead: true,
       });
 
       expect(results).toHaveLength(1);
@@ -174,6 +173,68 @@ describe('LambdaDBVectorStore', () => {
       await expect(
         vectorStore.similaritySearchVectorWithScore(invalidQueryVector, 5)
       ).rejects.toThrow('Vector dimension mismatch: expected 3, got 2');
+    });
+
+    it('should pass LambdaDB filter object to knn.filter (server-side)', async () => {
+      const queryVector = [0.1, 0.2, 0.3];
+      const k = 5;
+      const lambdadbFilter = { queryString: { query: 'source:docs AND year:2024' } };
+
+      await vectorStore.similaritySearchVectorWithScore(queryVector, k, lambdadbFilter);
+
+      expect(vectorStore['collection'].query).toHaveBeenCalledWith({
+        size: k,
+        query: {
+          knn: {
+            field: 'vector',
+            queryVector,
+            k,
+            filter: lambdadbFilter,
+          },
+        },
+        consistentRead: true,
+      });
+    });
+
+    it('should pass query string as knn.filter (converted to queryString)', async () => {
+      const queryVector = [0.1, 0.2, 0.3];
+      const k = 3;
+
+      await vectorStore.similaritySearchVectorWithScore(queryVector, k, 'category:tech');
+
+      expect(vectorStore['collection'].query).toHaveBeenCalledWith({
+        size: k,
+        query: {
+          knn: {
+            field: 'vector',
+            queryVector,
+            k,
+            filter: { queryString: { query: 'category:tech' } },
+          },
+        },
+        consistentRead: true,
+      });
+    });
+
+    it('should apply function filter client-side (no knn.filter in query)', async () => {
+      const queryVector = [0.1, 0.2, 0.3];
+      const k = 5;
+      const filterFn = () => false;
+
+      const results = await vectorStore.similaritySearchVectorWithScore(queryVector, k, filterFn);
+
+      expect(vectorStore['collection'].query).toHaveBeenCalledWith({
+        size: k,
+        query: {
+          knn: {
+            field: 'vector',
+            queryVector,
+            k,
+          },
+        },
+        consistentRead: true,
+      });
+      expect(results).toHaveLength(0);
     });
   });
 
@@ -235,6 +296,9 @@ describe('LambdaDBVectorStore', () => {
       const results = await vectorStore.maxMarginalRelevanceSearch(query, options);
 
       expect(mockEmbeddings.embedQuery).toHaveBeenCalledWith(query);
+      expect(vectorStore['collection'].query).toHaveBeenCalledWith(
+        expect.objectContaining({ includeVectors: true })
+      );
       expect(results).toHaveLength(1);
       expect(results[0]).toBeInstanceOf(Document);
     }, 10000);
@@ -250,10 +314,7 @@ describe('LambdaDBVectorStore', () => {
     }, 10000);
 
     it('should handle empty MMR results', async () => {
-      // Mock empty response
-      vectorStore['client'].collections.query = vi.fn().mockResolvedValue({
-        docs: []
-      });
+      mockCollectionHandle.query.mockResolvedValueOnce({ docs: [] });
 
       const query = 'test query';
       const options = { k: 3 };
@@ -264,14 +325,87 @@ describe('LambdaDBVectorStore', () => {
     }, 10000);
   });
 
+  describe('delete (LangChain VectorStore interface)', () => {
+    it('should throw when called with no args (avoid accidental wipe)', async () => {
+      await expect(vectorStore.delete()).rejects.toThrow(
+        'delete() requires explicit params to avoid accidental wipe'
+      );
+      expect(vectorStore['collection'].docs.delete).not.toHaveBeenCalled();
+    });
+
+    it('should throw when called with empty object', async () => {
+      await expect(vectorStore.delete({})).rejects.toThrow(
+        'delete() requires explicit params to avoid accidental wipe'
+      );
+      expect(vectorStore['collection'].docs.delete).not.toHaveBeenCalled();
+    });
+
+    it('should delete all documents when deleteAll is true', async () => {
+      await vectorStore.delete({ deleteAll: true });
+
+      expect(vectorStore['collection'].docs.delete).toHaveBeenCalledWith({
+        filter: { queryString: { query: '*:*' } },
+      });
+    });
+
+    it('should delete documents by ids when ids provided', async () => {
+      await vectorStore.delete({ ids: ['id1', 'id2'] });
+
+      expect(vectorStore['collection'].docs.delete).toHaveBeenCalledWith({
+        ids: ['id1', 'id2'],
+      });
+    });
+
+    it('should delete by LambdaDB filter object (server-side, no listAll)', async () => {
+      const lambdadbFilter = { queryString: { query: 'genre:documentary AND year:2019' } };
+      await vectorStore.delete({ filter: lambdadbFilter });
+
+      expect(vectorStore['collection'].docs.listAll).not.toHaveBeenCalled();
+      expect(vectorStore['collection'].docs.delete).toHaveBeenCalledWith({
+        filter: lambdadbFilter,
+      });
+    });
+
+    it('should delete by query string (converted to queryString filter)', async () => {
+      await vectorStore.delete({ filter: 'source:web' });
+
+      expect(vectorStore['collection'].docs.listAll).not.toHaveBeenCalled();
+      expect(vectorStore['collection'].docs.delete).toHaveBeenCalledWith({
+        filter: { queryString: { query: 'source:web' } },
+      });
+    });
+
+    it('should delete documents by filter function (client-side: listAll then delete by ids)', async () => {
+      mockCollectionHandle.docs.listAll.mockResolvedValue({
+        docs: [
+          { id: 'a', content: 'doc a' },
+          { id: 'b', content: 'doc b' },
+        ],
+        total: 2,
+      });
+
+      const filterFn = (doc: Document) => doc.metadata.id === 'a';
+      await vectorStore.delete({ filter: filterFn });
+
+      expect(vectorStore['collection'].docs.listAll).toHaveBeenCalledWith({ size: 100 });
+      expect(vectorStore['collection'].docs.delete).toHaveBeenCalledWith({ ids: ['a'] });
+    });
+
+    it('should throw when params provide no valid option', async () => {
+      await expect(vectorStore.delete({ other: 'value' })).rejects.toThrow(
+        'delete() requires one of: ids (string[]), filter (LambdaDB object/query string or function), or deleteAll (true)'
+      );
+    });
+  });
+
   describe('collection management', () => {
     it('should create collection with correct configuration', async () => {
       await vectorStore.createCollection();
 
-      expect(vectorStore['client'].collections.create).toHaveBeenCalledWith({
+      expect(vectorStore['client'].createCollection).toHaveBeenCalledWith({
         collectionName: 'test-collection',
         indexConfigs: {
-          vector: {  // Updated to use 'vector' field
+          vector: {
             type: 'vector',
             dimensions: 3,
             similarity: 'cosine',
@@ -283,9 +417,7 @@ describe('LambdaDBVectorStore', () => {
     it('should delete collection', async () => {
       await vectorStore.deleteCollection();
 
-      expect(vectorStore['client'].collections.delete).toHaveBeenCalledWith({
-        collectionName: 'test-collection'
-      });
+      expect(vectorStore['collection'].delete).toHaveBeenCalledWith();
     });
   });
 });

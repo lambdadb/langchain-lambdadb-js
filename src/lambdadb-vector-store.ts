@@ -1,7 +1,8 @@
 import { VectorStore } from "@langchain/core/vectorstores";
 import { Document } from "@langchain/core/documents";
 import { EmbeddingsInterface } from "@langchain/core/embeddings";
-import { LambdaDB } from "@functional-systems/lambdadb";
+import { maximalMarginalRelevance } from "@langchain/core/utils/math";
+import { LambdaDBClient } from "@functional-systems/lambdadb";
 
 import {
   LambdaDBConfig,
@@ -11,6 +12,7 @@ import {
   MaxMarginalRelevanceSearchOptions,
   CollectionInfo,
   RetryOptions,
+  type LambdaDBFilterObject,
 } from "./types.js";
 import {
   lambdaDBToDocument,
@@ -20,6 +22,7 @@ import {
   generateDocumentId,
   batchArray,
   withRetry,
+  toLambdaDBFilter,
   DEFAULT_RETRY_OPTIONS,
 } from "./utils.js";
 
@@ -27,9 +30,10 @@ import {
  * LambdaDB vector store implementation for LangChain
  */
 export class LambdaDBVectorStore extends VectorStore {
-  declare FilterType: DocumentFilter;
+  declare FilterType: DocumentFilter | LambdaDBFilterObject | string;
 
-  private client: LambdaDB;
+  private client: LambdaDBClient;
+  private collection: ReturnType<LambdaDBClient["collection"]>;
   private config: LambdaDBConfig;
   private textField: string;
   private vectorField: string;
@@ -53,12 +57,15 @@ export class LambdaDBVectorStore extends VectorStore {
     this.vectorField = this.config.vectorField!;
     this.retryOptions = { ...DEFAULT_RETRY_OPTIONS, ...(config.retryOptions || {}) };
     
-    // Initialize LambdaDB client
-    this.client = new LambdaDB({
+    // Initialize LambdaDB client (0.3.x SDK). Prefer baseUrl + projectName; serverURL supported for backward compatibility.
+    this.client = new LambdaDBClient({
       projectApiKey: config.projectApiKey,
+      ...(config.baseUrl && { baseUrl: config.baseUrl }),
+      ...(config.projectName && { projectName: config.projectName }),
       ...(config.serverURL && { serverURL: config.serverURL }),
-      timeoutMs: 30000, // 30 second timeout for all operations
+      timeoutMs: 30000,
     });
+    this.collection = this.client.collection(this.config.collectionName);
     
     // Validate collection exists if requested
     if (this.config.validateCollection) {
@@ -76,115 +83,97 @@ export class LambdaDBVectorStore extends VectorStore {
   }
 
   /**
-   * Add documents to the vector store
+   * Add documents to the vector store. Returns document IDs when provided by the store.
    */
-  async addDocuments(documents: Document[]): Promise<void> {
+  async addDocuments(documents: Document[]): Promise<string[] | void> {
     try {
-      // Handle empty document array
       if (documents.length === 0) {
-        return;
+        return [];
       }
-
       const texts = documents.map(({ pageContent }) => pageContent);
       const embeddings = await this.embeddings.embedDocuments(texts);
-      
-      await this.addVectors(embeddings, documents);
+      return this.addVectors(embeddings, documents);
     } catch (error) {
       throw handleLambdaDBError(error);
     }
   }
 
   /**
-   * Add vectors with associated documents to the store
+   * Add vectors with associated documents to the store. Returns the assigned document IDs.
    */
-  async addVectors(vectors: number[][], documents: Document[]): Promise<void> {
+  async addVectors(vectors: number[][], documents: Document[]): Promise<string[] | void> {
     try {
-      // Validate input lengths match
       if (vectors.length !== documents.length) {
         throw new Error("Vectors and documents length mismatch");
       }
-
-      // Validate vector dimensions
       if (vectors.length > 0) {
         validateVectorDimensions(vectors[0], this.config.vectorDimensions);
       }
-
-      // Ensure collection exists
       await this.ensureCollectionExists();
 
-      // Convert documents to LambdaDB format using configurable field names
       const lambdaDBDocs = vectors.map((vector, idx) => {
         const doc = documents[idx];
-        const docData: Record<string, any> = {
-          id: generateDocumentId(), // Use regular id field  
+        const id = generateDocumentId();
+        return {
+          id,
           [this.textField]: doc.pageContent,
           [this.vectorField]: vector,
           ...doc.metadata,
-        };
-        return docData;
+        } as Record<string, unknown>;
       });
 
-      // Batch upsert documents using correct API structure
-      const batchSize = 100; // Adjust based on LambdaDB limits
+      const batchSize = 100;
       const batches = batchArray(lambdaDBDocs, batchSize);
-
       for (const batch of batches) {
         await withRetry(async () => {
-          await this.client.collections.docs.upsert({
-            collectionName: this.config.collectionName,
-            requestBody: {
-              docs: batch,
-            },
-          });
+          await this.collection.docs.upsert({ docs: batch });
         }, this.retryOptions);
       }
+      return lambdaDBDocs.map((d) => d.id as string);
     } catch (error) {
       throw handleLambdaDBError(error);
     }
   }
 
   /**
-   * Perform similarity search with scores
+   * Perform similarity search with scores.
+   * Filter: object or string → LambdaDB knn.filter (server-side). Function → applied client-side after fetch.
    */
   async similaritySearchVectorWithScore(
     query: number[],
     k: number,
-    filter?: DocumentFilter
+    filter?: DocumentFilter | LambdaDBFilterObject | string
   ): Promise<[Document, number][]> {
     try {
       validateVectorDimensions(query, this.config.vectorDimensions);
 
-      // Query LambdaDB for similar vectors using correct KNN API structure with retry
+      const apiFilter = toLambdaDBFilter(filter);
+      const knn: Record<string, unknown> = {
+        field: this.vectorField,
+        queryVector: query,
+        k,
+      };
+      if (apiFilter) {
+        knn.filter = apiFilter;
+      }
+
       const response = await withRetry(async () => {
-        return await this.client.collections.query({
-          collectionName: this.config.collectionName,
-          requestBody: {
-            size: k,
-            query: {
-              knn: {
-                field: this.vectorField,
-                queryVector: query,
-                k: k
-              }
-            },
-            consistentRead: this.config.defaultConsistentRead,
-            // Add filter support if LambdaDB supports it in the future
-          },
+        return await this.collection.query({
+          size: k,
+          query: { knn },
+          consistentRead: this.config.defaultConsistentRead,
         });
       }, this.retryOptions);
 
-      // Convert results to LangChain format
       const formattedResults: [Document, number][] = response.docs.map((result) => {
         const doc = lambdaDBToDocument(result.doc, this.textField);
         const score = result.score || 0;
         return [doc, score];
       });
 
-      // Apply client-side filtering if needed
-      if (filter) {
-        return formattedResults.filter(([doc]) => filter(doc));
+      if (typeof filter === "function") {
+        return formattedResults.filter(([doc]) => (filter as DocumentFilter)(doc));
       }
-
       return formattedResults;
     } catch (error) {
       throw handleLambdaDBError(error);
@@ -197,7 +186,7 @@ export class LambdaDBVectorStore extends VectorStore {
   async similaritySearch(
     query: string,
     k = 4,
-    filter?: DocumentFilter
+    filter?: DocumentFilter | LambdaDBFilterObject | string
   ): Promise<Document[]> {
     const embeddings = await this.embeddings.embedQuery(query);
     const results = await this.similaritySearchVectorWithScore(embeddings, k, filter);
@@ -205,29 +194,29 @@ export class LambdaDBVectorStore extends VectorStore {
   }
 
   /**
-   * Create a new collection with vector index
+   * Create a new collection with vector index.
+   * Waits for CREATING → ACTIVE before resolving (LambdaDB creates asynchronously).
    */
   async createCollection(options?: Partial<CreateCollectionOptions>): Promise<void> {
     try {
-      // Create collection with proper index configuration using LambdaDB types with retry
       await withRetry(async () => {
-        await this.client.collections.create({
+        await this.client.createCollection({
           collectionName: this.config.collectionName,
           indexConfigs: {
-            // Vector index configuration for the embedding field
             [this.vectorField]: {
               type: "vector" as const,
               dimensions: this.config.vectorDimensions,
               similarity: (this.config.similarityMetric?.toLowerCase() || "cosine") as "cosine" | "euclidean" | "dot_product" | "max_inner_product",
             },
-            // Add other index configurations if provided
             ...(this.config.indexConfig || {}),
             ...(options?.indexConfig || {}),
           },
+          ...(this.config.partitionConfig || options?.partitionConfig
+            ? { partitionConfig: options?.partitionConfig ?? this.config.partitionConfig }
+            : {}),
         });
       }, this.retryOptions);
 
-      // Wait for collection to become ACTIVE before proceeding
       await this.waitForCollectionActive();
     } catch (error) {
       throw handleLambdaDBError(error);
@@ -235,7 +224,8 @@ export class LambdaDBVectorStore extends VectorStore {
   }
 
   /**
-   * Wait for collection to become ACTIVE
+   * Wait for collection to become ACTIVE (CREATING → ACTIVE).
+   * LambdaDB creates asynchronously; createCollection() uses this so callers see ACTIVE.
    */
   private async waitForCollectionActive(maxWaitTimeMs: number = 30000): Promise<void> {
     const startTime = Date.now();
@@ -270,16 +260,61 @@ export class LambdaDBVectorStore extends VectorStore {
   }
 
   /**
-   * Delete the collection
+   * Delete the collection. LambdaDB deletes asynchronously (DELETING → removed);
+   * once DELETING, eventual removal is guaranteed. Does not wait for removal.
+   * Resolves without throwing if already gone (404) or already DELETING (400 "in DELETING state").
    */
   async deleteCollection(): Promise<void> {
     try {
-      await this.client.collections.delete({
-        collectionName: this.config.collectionName,
-      });
-    } catch (error) {
+      await this.collection.delete();
+    } catch (error: unknown) {
+      const err = error as {
+        status?: number;
+        statusCode?: number;
+        body?: { message?: string };
+        message?: string;
+      };
+      const status = err.status ?? err.statusCode;
+      const message = err.body?.message ?? err.message ?? '';
+      if (status === 404) return; // already deleted
+      if (status === 400 && String(message).includes('DELETING state')) return; // delete already in progress
       throw handleLambdaDBError(error);
     }
+  }
+
+  /**
+   * Delete documents from the vector store (LangChain VectorStore interface).
+   * Maps _params to DeleteOptions and delegates to deleteDocuments().
+   * Requires explicit params to avoid accidental full collection wipe.
+   *
+   * @param _params - One of: { ids?: string[] } | { filter?: DocumentFilter } | { deleteAll: true }.
+   *                 Omitted or empty → throws (no default to deleteAll).
+   */
+  async delete(_params?: Record<string, any>): Promise<void> {
+    if (!_params || Object.keys(_params).length === 0) {
+      throw new Error(
+        "delete() requires explicit params to avoid accidental wipe. Pass one of: { ids: string[] }, { filter: (doc) => boolean }, or { deleteAll: true }"
+      );
+    }
+    if (_params.deleteAll === true) {
+      await this.deleteDocuments({ deleteAll: true });
+      return;
+    }
+    if (Array.isArray(_params.ids) && _params.ids.length > 0) {
+      await this.deleteDocuments({ ids: _params.ids });
+      return;
+    }
+    if (
+      typeof _params.filter === "function" ||
+      (typeof _params.filter === "object" && _params.filter !== null) ||
+      typeof _params.filter === "string"
+    ) {
+      await this.deleteDocuments({ filter: _params.filter });
+      return;
+    }
+    throw new Error(
+      "delete() requires one of: ids (string[]), filter (LambdaDB object/query string or function), or deleteAll (true)"
+    );
   }
 
   /**
@@ -288,35 +323,30 @@ export class LambdaDBVectorStore extends VectorStore {
   async deleteDocuments(options: DeleteOptions): Promise<void> {
     try {
       if (options.deleteAll) {
-        // Delete all documents by getting all and deleting by IDs
-        // LambdaDB doesn't support deleteAll directly
-        const allDocs = await this.getAllDocuments();
-        const idsToDelete = allDocs
-          .map((doc) => doc.metadata.id)
-          .filter((id) => id);
-
-        if (idsToDelete.length > 0) {
-          await this.deleteDocuments({ ids: idsToDelete });
-        }
+        // Delete all documents using LambdaDB filter with wildcard match-all.
+        // See https://docs.lambdadb.ai/guides/documents/delete-data
+        await this.collection.docs.delete({
+          filter: { queryString: { query: "*:*" } },
+        });
       } else if (options.ids && options.ids.length > 0) {
         // Delete documents by IDs
-        await this.client.collections.docs.delete({
-          collectionName: this.config.collectionName,
-          requestBody: {
-            ids: options.ids,
-          },
-        });
-      } else if (options.filter) {
-        // For filter-based deletion, we need to first find matching documents
-        // This is a two-step process: search then delete
-        const allDocs = await this.getAllDocuments();
-        const docsToDelete = allDocs.filter(options.filter);
-        const idsToDelete = docsToDelete
-          .map((doc) => doc.metadata.id)
-          .filter((id) => id);
-
-        if (idsToDelete.length > 0) {
-          await this.deleteDocuments({ ids: idsToDelete });
+        await this.collection.docs.delete({ ids: options.ids });
+      } else if (options.filter !== undefined && options.filter !== null) {
+        if (typeof options.filter === "function") {
+          // Client-side filter: fetch all, filter, delete by ids (less efficient for large collections)
+          const allDocs = await this.getAllDocuments();
+          const docsToDelete = allDocs.filter(options.filter as DocumentFilter);
+          const idsToDelete = docsToDelete
+            .map((doc) => doc.metadata.id)
+            .filter((id) => id);
+          if (idsToDelete.length > 0) {
+            await this.deleteDocuments({ ids: idsToDelete });
+          }
+        } else {
+          const apiFilter = toLambdaDBFilter(options.filter);
+          if (apiFilter) {
+            await this.collection.docs.delete({ filter: apiFilter });
+          }
         }
       } else {
         throw new Error("Must provide either ids, filter, or deleteAll option");
@@ -327,79 +357,62 @@ export class LambdaDBVectorStore extends VectorStore {
   }
 
   /**
-   * Maximum marginal relevance search
+   * Maximum marginal relevance search: balances relevance to the query with diversity among results.
+   * Fetches candidates with includeVectors: true and computes MMR using vector similarity.
    */
   async maxMarginalRelevanceSearch(
     query: string,
     options: MaxMarginalRelevanceSearchOptions,
     _callbacks?: any
   ): Promise<Document[]> {
-    const {
-      k = 4,
-      fetchK = 20,
-      lambda = 0.5,
-      filter,
-    } = options;
+    const { k = 4, fetchK = 20, lambda = 0.5, filter } = options;
 
     try {
-      // Convert filter to function if needed
-      const filterFn: DocumentFilter | undefined = typeof filter === 'function' 
-        ? filter as DocumentFilter 
-        : undefined;
+      const queryVector = await this.embeddings.embedQuery(query);
+      validateVectorDimensions(queryVector, this.config.vectorDimensions);
 
-      // First, get more candidates than needed
-      const candidateResults = await this.similaritySearchVectorWithScore(
-        await this.embeddings.embedQuery(query),
-        fetchK,
-        filterFn
+      const apiFilter = toLambdaDBFilter(
+        filter as DocumentFilter | LambdaDBFilterObject | string | undefined
       );
-
-      if (candidateResults.length === 0) {
-        return [];
+      const knn: Record<string, unknown> = {
+        field: this.vectorField,
+        queryVector,
+        k: fetchK,
+      };
+      if (apiFilter) {
+        knn.filter = apiFilter;
       }
 
-      // Extract embeddings for MMR calculation (this would require storing vectors)
-      // For now, we'll implement a simplified version that just returns top-k results
-      // A full MMR implementation would require vector storage and access
-      const selected: Document[] = [];
-      const candidates = candidateResults.map(([doc]) => doc);
+      const response = await withRetry(async () => {
+        return await this.collection.query({
+          size: fetchK,
+          query: { knn },
+          consistentRead: this.config.defaultConsistentRead,
+          includeVectors: true,
+        });
+      }, this.retryOptions);
 
-      // Select first document (highest similarity)
-      if (candidates.length > 0) {
-        selected.push(candidates[0]);
+      const candidates: { doc: Document; score: number; vector: number[] }[] = [];
+      for (const result of response.docs ?? []) {
+        const rawDoc = result.doc ?? result;
+        const vector = rawDoc[this.vectorField];
+        if (!Array.isArray(vector) || vector.length === 0) continue;
+        const doc = lambdaDBToDocument(rawDoc as Record<string, unknown>, this.textField);
+        const score = typeof result.score === "number" ? result.score : 0;
+        candidates.push({ doc, score, vector });
       }
 
-      // For remaining selections, balance relevance and diversity
-      // This is a simplified MMR - a full implementation would calculate
-      // vector similarities between candidates
-      while (selected.length < k && selected.length < candidates.length) {
-        let bestIdx = -1;
-        let bestScore = -Infinity;
+      if (candidates.length === 0) return [];
 
-        for (let i = 0; i < candidates.length; i++) {
-          const candidate = candidates[i];
-          if (selected.includes(candidate)) continue;
+      const applyClientFilter = typeof filter === "function";
+      const list = applyClientFilter
+        ? candidates.filter((c) => (filter as DocumentFilter)(c.doc))
+        : candidates;
+      if (list.length === 0) return [];
 
-          // Simplified scoring: favor later results (more diverse)
-          // In full MMR, this would be: lambda * similarity - (1-lambda) * max_similarity_to_selected
-          const diversityBonus = (1 - lambda) * (i / candidates.length);
-          const relevanceScore = lambda * (1 - i / candidates.length);
-          const score = relevanceScore + diversityBonus;
-
-          if (score > bestScore) {
-            bestScore = score;
-            bestIdx = i;
-          }
-        }
-
-        if (bestIdx >= 0) {
-          selected.push(candidates[bestIdx]);
-        } else {
-          break;
-        }
-      }
-
-      return selected.slice(0, k);
+      const embeddingList = list.map((c) => c.vector);
+      const selectedIndexes = maximalMarginalRelevance(queryVector, embeddingList, lambda, k);
+      return selectedIndexes.map((i) => list[i].doc);
     } catch (error) {
       throw handleLambdaDBError(error);
     }
@@ -410,16 +423,14 @@ export class LambdaDBVectorStore extends VectorStore {
    */
   async getCollectionInfo(): Promise<CollectionInfo> {
     try {
-      const response = await this.client.collections.get({
-        collectionName: this.config.collectionName,
-      });
+      const response = await this.collection.get();
+      const col = response.collection;
 
       return {
-        name: response.collection.collectionName || this.config.collectionName,
-        status: response.collection.collectionStatus || "unknown",
-        documentCount: response.collection.numDocs,
-        indexConfigs: response.collection.indexConfigs,
-        // These fields might not be available in the current API
+        name: col.collectionName ?? this.config.collectionName,
+        status: col.collectionStatus ?? "unknown",
+        documentCount: col.numDocs,
+        indexConfigs: col.indexConfigs,
         createdAt: undefined,
         updatedAt: undefined,
       };
@@ -463,25 +474,30 @@ export class LambdaDBVectorStore extends VectorStore {
    */
   private async validateCollectionExists(): Promise<void> {
     try {
-      await this.client.collections.get({
-        collectionName: this.config.collectionName,
-      });
+      await this.collection.get();
     } catch (error) {
       throw new Error(`Collection '${this.config.collectionName}' does not exist: ${error}`);
     }
   }
 
   /**
-   * Get all documents from the collection (for internal operations)
+   * Get all documents from the collection (for internal operations, e.g. filter-based delete).
+   * Uses LambdaDB list API with pagination; supports both response shapes:
+   * { collection, doc } (OpenAPI example) or flat doc object.
    */
   private async getAllDocuments(): Promise<Document[]> {
     try {
-      // TODO: Implement proper "get all documents" functionality
-      // For now, return empty array since LambdaDB doesn't support simple match-all queries
-      // This affects deleteAll functionality - we'll need to implement pagination or
-      // use a different approach for bulk operations
-      console.warn('getAllDocuments not implemented - returning empty array');
-      return [];
+      const result = await this.collection.docs.listAll({ size: 100 });
+      const documents: Document[] = [];
+      for (const item of result.docs ?? []) {
+        const raw = item && typeof item === "object" && "doc" in item ? (item as { doc: Record<string, unknown> }).doc : item;
+        const doc = lambdaDBToDocument(raw as Record<string, unknown>, this.textField);
+        if (raw && typeof raw === "object" && "id" in raw && raw.id !== undefined) {
+          doc.metadata.id = raw.id as string;
+        }
+        documents.push(doc);
+      }
+      return documents;
     } catch (error) {
       throw handleLambdaDBError(error);
     }
@@ -492,22 +508,19 @@ export class LambdaDBVectorStore extends VectorStore {
    */
   private async ensureCollectionExists(): Promise<void> {
     try {
-      // Try to get collection info
-      const response = await this.client.collections.list();
-      const collectionExists = response.collections && response.collections.some(
-        (collection: any) => collection.name === this.config.collectionName
+      const response = await this.client.listCollections();
+      const collectionExists = response.collections?.some(
+        (c: { collectionName: string }) => c.collectionName === this.config.collectionName
       );
 
       if (!collectionExists) {
         await this.createCollection();
       }
     } catch (error) {
-      // If getting collection info fails, try creating it
       try {
         await this.createCollection();
       } catch (createError) {
-        // If creation also fails, the collection might already exist
-        // This is a common race condition, so we can ignore it
+        // Collection might already exist (race condition)
       }
     }
   }

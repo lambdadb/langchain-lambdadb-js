@@ -12,12 +12,14 @@ new LambdaDB({
   serverUrl: serverUrl  // Wrong parameter name!
 });
 
-// ✅ CORRECT
-new LambdaDB({
+// ✅ CORRECT (prefer baseUrl + projectName)
+new LambdaDBClient({
   projectApiKey: apiKey,
-  serverURL: serverUrl,  // Must be serverURL (capital letters!)
-  timeoutMs: 30000       // Always set timeout to prevent hanging
+  baseUrl: 'https://api.lambdadb.ai',
+  projectName: 'your-project',
+  timeoutMs: 30000
 });
+// Or legacy: serverURL (must be serverURL, not serverUrl) for full URL override
 ```
 
 ### 2. Vector Query Structure

@@ -14,6 +14,7 @@ A production-ready TypeScript library that integrates [LambdaDB](https://lambdad
 - 🧪 **Production Ready**: Comprehensive test suite with 43 passing tests (16 unit + 27 integration)
 - 🔄 **Retry Logic**: Built-in exponential backoff for robust error handling
 - 📈 **Collection Management**: Full lifecycle management with state monitoring
+- 🗑️ **Document Deletion**: LangChain `delete()` support with server-side LambdaDB filter (by ids, filter, or deleteAll)
 
 ## Installation
 
@@ -83,12 +84,15 @@ console.log(results);
 | `collectionName` | `string` | ✅ | Name of the collection to use |
 | `vectorDimensions` | `number` | ✅ | Vector dimensions for embeddings |
 | `similarityMetric` | `SimilarityMetric` | ❌ | Similarity metric (default: 'cosine') |
-| `serverURL` | `string` | ❌ | Custom LambdaDB server URL (note: serverURL not serverUrl) |
+| `baseUrl` | `string` | ❌ | API base URL (e.g. https://api.lambdadb.ai). Preferred with `projectName`. |
+| `projectName` | `string` | ❌ | Project name (path under /projects/). Preferred with `baseUrl`. |
+| `serverURL` | `string` | ❌ | **Deprecated.** Full server URL override. Prefer `baseUrl` + `projectName`. |
 | `textField` | `string` | ❌ | Field name for document content (default: 'content') |
 | `vectorField` | `string` | ❌ | Field name for vectors (default: 'vector') |
 | `validateCollection` | `boolean` | ❌ | Validate collection before operations (default: false) |
 | `defaultConsistentRead` | `boolean` | ❌ | Use consistent reads by default (default: true) |
 | `retryOptions` | `RetryOptions` | ❌ | Configure retry behavior with exponential backoff |
+| `partitionConfig` | `PartitionConfigOption` | ❌ | Optional partition config for collection creation |
 
 ### Similarity Metrics
 
@@ -178,17 +182,64 @@ const mmrResults = await vectorStore.maxMarginalRelevanceSearch(
 
 ### Advanced Filtering
 
-```typescript
-// Search with custom filter
-const filterFunction = (doc: Document) => {
-  return doc.metadata.category === 'technology';
-};
+**Search** supports server-side filters (LambdaDB syntax) or a client-side function. Prefer server-side for efficiency.
 
-const filteredResults = await vectorStore.similaritySearchVectorWithScore(
+```typescript
+// Server-side: LambdaDB query string (recommended)
+const results = await vectorStore.similaritySearchVectorWithScore(
   queryVector,
   5,
-  filterFunction
+  'category:technology'
 );
+
+// Server-side: full LambdaDB filter object
+const results2 = await vectorStore.similaritySearchVectorWithScore(queryVector, 5, {
+  queryString: { query: 'category:technology AND year:2024' },
+});
+
+// Client-side: filter function (applied after fetch)
+const filterFn = (doc: Document) => doc.metadata?.category === 'technology';
+const results3 = await vectorStore.similaritySearchVectorWithScore(queryVector, 5, filterFn);
+```
+
+See [LambdaDB Query string](https://docs.lambdadb.ai/guides/search/query-string) for filter syntax.
+
+### Deleting Documents
+
+The store implements the LangChain VectorStore `delete()` interface. **You must pass explicit parameters** (no default to delete all, to avoid accidental wipe).
+
+**By IDs** (most efficient when you know the ids):
+
+```typescript
+await vectorStore.delete({ ids: ['id1', 'id2'] });
+```
+
+**By LambdaDB filter** (recommended when filtering by metadata; server-side, one API call):
+
+```typescript
+// Query string – converted to LambdaDB queryString filter
+await vectorStore.delete({ filter: 'genre:documentary AND year:2019' });
+
+// Or full LambdaDB filter object
+await vectorStore.delete({
+  filter: { queryString: { query: 'genre:documentary AND year:2019' } },
+});
+```
+
+See [LambdaDB Delete data](https://docs.lambdadb.ai/guides/documents/delete-data) and [Query string](https://docs.lambdadb.ai/guides/search/query-string) for filter syntax.
+
+**Delete all documents** in the collection (explicit):
+
+```typescript
+await vectorStore.delete({ deleteAll: true });
+```
+
+**By client-side filter function** (fetches all docs then deletes by ids; use only when LambdaDB filter is not enough):
+
+```typescript
+await vectorStore.delete({
+  filter: (doc) => doc.metadata.source === 'legacy',
+});
 ```
 
 ### RAG (Retrieval-Augmented Generation) Integration
@@ -223,20 +274,20 @@ new LambdaDBVectorStore(embeddings: EmbeddingsInterface, config: LambdaDBConfig)
 
 #### Methods
 
-##### `addDocuments(documents: Document[]): Promise<void>`
-Adds documents to the vector store with automatic embedding generation.
+##### `addDocuments(documents: Document[]): Promise<string[] \| void>`
+Adds documents to the vector store with automatic embedding generation. Returns assigned document IDs.
 
-##### `addVectors(vectors: number[][], documents: Document[]): Promise<void>`
-Adds pre-computed vectors with associated documents.
+##### `addVectors(vectors: number[][], documents: Document[]): Promise<string[] \| void>`
+Adds pre-computed vectors with associated documents. Returns assigned document IDs.
 
 ##### `similaritySearch(query: string, k?: number, filter?: DocumentFilter): Promise<Document[]>`
 Performs similarity search with a text query.
 
-##### `similaritySearchVectorWithScore(query: number[], k: number, filter?: DocumentFilter): Promise<[Document, number][]>`
-Performs similarity search with a vector query, returns documents with similarity scores.
+##### `similaritySearchVectorWithScore(query: number[], k: number, filter?: DocumentFilter | LambdaDBFilterObject | string): Promise<[Document, number][]>`
+Performs similarity search with a vector query, returns documents with similarity scores. **Filter**: string or LambdaDB object → server-side `knn.filter`; function → client-side filter after fetch.
 
 ##### `maxMarginalRelevanceSearch(query: string, options?: MMRSearchOptions): Promise<Document[]>`
-Performs Max Marginal Relevance search for diverse results balancing relevance and diversity.
+Performs MMR search using vector similarity: fetches candidates with `includeVectors: true` and balances relevance to the query with diversity among selected documents (cosine similarity).
 
 ##### `createCollection(options?: Partial<CreateCollectionOptions>): Promise<void>`
 Creates a new collection in LambdaDB with proper state monitoring.
@@ -246,6 +297,17 @@ Deletes the collection from LambdaDB.
 
 ##### `getCollectionInfo(): Promise<CollectionInfo>`
 Returns information about the collection including status and document count.
+
+##### `delete(_params?: Record<string, any>): Promise<void>` (LangChain VectorStore interface)
+Deletes documents. **Requires explicit params** (no default). Use one of:
+
+- `{ ids: string[] }` – delete by document IDs
+- `{ filter: string | LambdaDBFilterObject }` – server-side delete (recommended); string is used as `queryString.query`
+- `{ filter: (doc: Document) => boolean }` – client-side filter (fetches all, then deletes by ids)
+- `{ deleteAll: true }` – delete all documents in the collection
+
+##### `deleteDocuments(options: DeleteOptions): Promise<void>`
+Lower-level delete with the same options as `delete()`: `ids`, `filter` (string, LambdaDB object, or function), or `deleteAll: true`.
 
 #### Static Factory Methods
 
@@ -332,14 +394,17 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - **Error Handling**: Comprehensive error handling with retry logic and exponential backoff
 - **Field Name Configuration**: Supports custom field names for text and vector data
 - **Batch Processing**: Efficient bulk operations with proper error handling
-- **Test Coverage**: 43 tests covering all functionality including edge cases
+- **MMR**: Vector-based MMR with `includeVectors: true` and cosine similarity for relevance/diversity balance
+- **Client options**: Prefer `baseUrl` + `projectName`; `serverURL` supported but deprecated
+- **Test Coverage**: Unit and integration tests covering core functionality and edge cases
 
 ### LambdaDB Integration Notes
 
 - Uses KNN query format: `{ knn: { field, queryVector, k } }`
-- Requires exact parameter name `serverURL` (not `serverUrl`)
+- Prefer `baseUrl` + `projectName`; use `serverURL` (exact name, not `serverUrl`) only if overriding full URL
 - Supports immediate consistency with `consistentRead: true`
-- Collection creation includes state polling until ACTIVE
+- Collection creation includes state polling until ACTIVE; optional `partitionConfig` supported
+- **Delete**: Prefer server-side filter (`filter` as string or LambdaDB object) for efficiency; `deleteAll: true` uses LambdaDB filter `{ queryString: { query: "*:*" } }`. [Delete data](https://docs.lambdadb.ai/guides/documents/delete-data)
 
 ## Links
 

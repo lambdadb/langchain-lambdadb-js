@@ -1,7 +1,7 @@
 /**
  * Minimal Integration Test for LambdaDB Vector Store
- * 
- * This test focuses on core functionality without complex retry logic.
+ *
+ * Uses defaultConsistentRead: true so query/fetch see writes immediately (LambdaDB is eventually consistent by default).
  */
 
 import { describe, it, expect } from 'vitest';
@@ -35,11 +35,9 @@ describe('LambdaDB Minimal Integration Test', () => {
       collectionName,
       vectorDimensions: 3,
       similarityMetric: 'cosine' as const,
+      defaultConsistentRead: true,
       validateCollection: false,
-      retryOptions: {
-        maxAttempts: 1, // No retries to prevent hanging
-        initialDelay: 0,
-      },
+      retryOptions: { maxAttempts: 1, initialDelay: 0 },
     };
 
     const vectorStore = new LambdaDBVectorStore(embeddings, config);

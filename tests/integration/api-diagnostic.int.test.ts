@@ -1,12 +1,33 @@
 /**
  * Diagnostic test to check LambdaDB API connectivity
- * 
- * This test directly uses the LambdaDB client to verify connection
- * without going through our vector store implementation.
+ *
+ * Uses the LambdaDB 0.3.x client (LambdaDBClient) to verify connection.
+ * LambdaDB creates/deletes asynchronously: CREATING → ACTIVE (we wait), DELETING → removed (guaranteed; we do not wait).
  */
 
-import { describe, it, expect, beforeAll } from 'vitest';
-import { LambdaDB } from '@functional-systems/lambdadb';
+import { describe, it, expect } from 'vitest';
+import { LambdaDBClient } from '@functional-systems/lambdadb';
+
+/** Poll until collection status is ACTIVE (LambdaDB creates asynchronously). */
+async function waitForCollectionActive(
+  client: LambdaDBClient,
+  collectionName: string,
+  maxWaitMs = 30000,
+  pollIntervalMs = 1000
+): Promise<void> {
+  const start = Date.now();
+  while (Date.now() - start < maxWaitMs) {
+    const list = await client.listCollections();
+    const col = list.collections?.find((c: { collectionName?: string }) => c.collectionName === collectionName);
+    const status = (col as { collectionStatus?: string } | undefined)?.collectionStatus;
+    if (status === 'ACTIVE') return;
+    if (status === 'FAILED' || status === 'ERROR') {
+      throw new Error(`Collection entered ${status}`);
+    }
+    await new Promise((r) => setTimeout(r, pollIntervalMs));
+  }
+  throw new Error(`Collection did not become ACTIVE within ${maxWaitMs}ms`);
+}
 
 describe('LambdaDB API Diagnostic', () => {
   it('should connect to LambdaDB and list collections', async () => {
@@ -14,7 +35,7 @@ describe('LambdaDB API Diagnostic', () => {
       throw new Error('LAMBDADB_API_KEY environment variable is required');
     }
 
-    const client = new LambdaDB({
+    const client = new LambdaDBClient({
       projectApiKey: process.env.LAMBDADB_API_KEY!,
       ...(process.env.LAMBDADB_SERVER_URL && { serverURL: process.env.LAMBDADB_SERVER_URL }),
       timeoutMs: 10000
@@ -24,7 +45,7 @@ describe('LambdaDB API Diagnostic', () => {
     console.log('🌐 Server URL:', process.env.LAMBDADB_SERVER_URL || 'default');
 
     try {
-      const response = await client.collections.list();
+      const response = await client.listCollections();
       console.log('✅ Successfully connected to LambdaDB!');
       console.log('📋 Collections response:', JSON.stringify(response, null, 2));
       
@@ -44,18 +65,19 @@ describe('LambdaDB API Diagnostic', () => {
       throw new Error('LAMBDADB_API_KEY environment variable is required');
     }
 
-    const client = new LambdaDB({
+    const client = new LambdaDBClient({
       projectApiKey: process.env.LAMBDADB_API_KEY!,
       ...(process.env.LAMBDADB_SERVER_URL && { serverURL: process.env.LAMBDADB_SERVER_URL }),
       timeoutMs: 10000
     });
 
     const testCollectionName = `diagnostic_test_${Date.now()}`;
-    
+    const collection = client.collection(testCollectionName);
+
     try {
       console.log(`🔨 Attempting to create collection: ${testCollectionName}`);
-      
-      await client.collections.create({
+
+      await client.createCollection({
         collectionName: testCollectionName,
         indexConfigs: {
           embedding: {
@@ -65,18 +87,15 @@ describe('LambdaDB API Diagnostic', () => {
           },
         },
       });
-      
+
       console.log('✅ Collection creation succeeded!');
-      
-      // Clean up
-      try {
-        await client.collections.delete({
-          collectionName: testCollectionName,
-        });
-        console.log('🧹 Collection cleanup succeeded!');
-      } catch (cleanupError) {
-        console.warn('⚠️ Collection cleanup failed:', cleanupError.message);
-      }
+
+      // Wait for CREATING → ACTIVE before delete (LambdaDB does not allow delete while CREATING)
+      await waitForCollectionActive(client, testCollectionName);
+      console.log('✅ Collection is ACTIVE, proceeding to delete.');
+
+      await collection.delete();
+      console.log('🧹 Collection delete requested (DELETING → removal is guaranteed by LambdaDB).');
       
     } catch (error) {
       console.error('❌ Collection creation failed:');
@@ -86,5 +105,5 @@ describe('LambdaDB API Diagnostic', () => {
       console.error('Error body:', error.body);
       throw error;
     }
-  }, 30000);
+  }, 60000); // CREATING→ACTIVE + delete
 });

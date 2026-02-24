@@ -1,0 +1,54 @@
+# Publish to npm (OIDC trusted publishing — no NPM_TOKEN required).
+# Trigger: push tag v* (e.g. v0.3.0 or v0.3.0-dev.1) or workflow_dispatch.
+# - On tag push: package version is set from the tag (e.g. v0.3.0-dev.1 → 0.3.0-dev.1).
+# - Use unique versions for each publish: 0.3.0-dev.1, 0.3.0-rc.1 (npm does not allow overwriting).
+# - Pre-release versions (contain '-') are published with dist-tag "dev" or "rc"; stable with "latest".
+# npm Trusted Publisher must be configured for this repo/workflow on npmjs.com.
+name: Publish to npm
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  id-token: write  # Required for npm OIDC trusted publishing
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      # When triggered by a tag, set package version from tag (e.g. v0.3.0-dev → 0.3.0-dev)
+      - name: Set version from tag
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/}"
+          VERSION="${VERSION#v}"
+          npm pkg set version="$VERSION"
+          echo "Publishing version: $VERSION"
+
+      - run: npm ci
+      - run: npm run test:unit
+      - run: npm run build
+
+      # npm Trusted Publishing requires npm 11.5.1+
+      - run: npm install -g npm@latest
+
+      # Pre-release: 0.3.0-rc.* → tag "rc"; *-* → "dev"; stable → "latest". Auth via OIDC.
+      - name: Publish to npm
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          if [[ "$VERSION" == *-rc.* ]] || [[ "$VERSION" == *-rc ]]; then TAG=rc
+          elif [[ "$VERSION" == *-* ]]; then TAG=dev
+          else TAG=latest; fi
+          echo "Publishing @functional-systems/langchain-lambdadb@$VERSION with tag $TAG"
+          npm publish --access public --tag "$TAG"

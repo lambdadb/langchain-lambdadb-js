@@ -1,8 +1,10 @@
 /**
  * Comprehensive Integration Tests for LambdaDB Vector Store
- * 
- * Tests the complete LangChain integration functionality with real LambdaDB service.
- * Based on LangChain vector store test patterns and Python integration reference.
+ *
+ * LambdaDB behavior:
+ * - Only fields listed in indexConfigs at collection creation are indexed; unlisted fields are not searchable/filterable.
+ * - Default is eventual consistency; we set defaultConsistentRead: true so query/fetch see writes immediately (minimal delay needed).
+ * - Collection create/delete are async: createCollection() waits for CREATING → ACTIVE; deleteCollection() does not wait for removal (DELETING → removed is guaranteed by LambdaDB). Reusing the same collection name shortly after delete may fail.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -52,7 +54,8 @@ describe('LambdaDB Comprehensive Integration Tests', () => {
       collectionName,
       vectorDimensions: 3,
       similarityMetric: 'cosine',
-      retryOptions: { maxAttempts: 2, initialDelay: 100 }, // Faster retries for tests
+      defaultConsistentRead: true, // Required so query/fetch see writes immediately (LambdaDB is eventually consistent by default)
+      retryOptions: { maxAttempts: 2, initialDelay: 100 },
     });
   });
 
@@ -67,19 +70,17 @@ describe('LambdaDB Comprehensive Integration Tests', () => {
   });
 
   describe('Collection Management', () => {
-    it('should create and manage collection lifecycle', async () => {
-      // Test collection creation
+    it('should create (CREATING → ACTIVE) and delete', async () => {
       await vectorStore.createCollection();
-      
-      // Verify collection info
+
       const info = await vectorStore.getCollectionInfo();
       expect(info.name).toBe(collectionName);
       expect(info.status).toBe('ACTIVE');
       expect(info.documentCount).toBe(0);
-      expect(info.indexConfigs).toHaveProperty('vector'); // Updated to match new default
-      
-      // Test deletion
+      expect(info.indexConfigs).toHaveProperty('vector');
+
       await vectorStore.deleteCollection();
+      // DELETING → removal is guaranteed by LambdaDB; we do not wait. Same name reuse shortly after may fail.
     }, 90000);
   });
 
@@ -102,12 +103,16 @@ describe('LambdaDB Comprehensive Integration Tests', () => {
         })
       ];
       
-      // Test addDocuments
-      await vectorStore.addDocuments(documents);
-      
-      // Wait a moment for indexing
-      await new Promise(resolve => setTimeout(resolve, 2000));
-      
+      // Test addDocuments and return value (ids)
+      const ids = await vectorStore.addDocuments(documents);
+      expect(ids).toBeDefined();
+      expect(Array.isArray(ids)).toBe(true);
+      expect((ids as string[]).length).toBe(documents.length);
+      (ids as string[]).forEach((id) => expect(typeof id === 'string' && id.length > 0).toBe(true));
+
+      // defaultConsistentRead: true so minimal delay; short wait for API propagation
+      await new Promise((resolve) => setTimeout(resolve, 500));
+
       // Test similarity search by text
       const searchResults = await vectorStore.similaritySearch('programming language', 2);
       expect(searchResults).toHaveLength(2);
@@ -146,9 +151,8 @@ describe('LambdaDB Comprehensive Integration Tests', () => {
       // Test addVectors
       await vectorStore.addVectors(vectors, documents);
       
-      // Wait for indexing
-      await new Promise(resolve => setTimeout(resolve, 2000));
-      
+      await new Promise((resolve) => setTimeout(resolve, 500));
+
       // Test vector similarity search
       const queryVector = [0.7, 0.5, 0.1]; // Similar to first vector
       const results = await vectorStore.similaritySearchVectorWithScore(queryVector, 2);
@@ -186,13 +190,13 @@ describe('LambdaDB Comprehensive Integration Tests', () => {
           collectionName: `fromtexts_${Date.now()}`,
           vectorDimensions: 3,
           similarityMetric: 'cosine',
+          defaultConsistentRead: true,
         }
       );
       
       expect(store).toBeInstanceOf(LambdaDBVectorStore);
       
-      // Test search functionality
-      await new Promise(resolve => setTimeout(resolve, 2000));
+      await new Promise((resolve) => setTimeout(resolve, 500));
       const results = await store.similaritySearch('React framework', 2);
       expect(results).toHaveLength(2);
       
@@ -228,13 +232,13 @@ describe('LambdaDB Comprehensive Integration Tests', () => {
           collectionName: `fromdocs_${Date.now()}`,
           vectorDimensions: 3,
           similarityMetric: 'cosine',
+          defaultConsistentRead: true,
         }
       );
       
       expect(store).toBeInstanceOf(LambdaDBVectorStore);
       
-      // Test search functionality
-      await new Promise(resolve => setTimeout(resolve, 2000));
+      await new Promise((resolve) => setTimeout(resolve, 500));
       const results = await store.similaritySearch('typing system', 1);
       expect(results).toHaveLength(1);
       expect(results[0].pageContent).toContain('TypeScript');
@@ -258,8 +262,8 @@ describe('LambdaDB Comprehensive Integration Tests', () => {
       ];
       
       await vectorStore.addDocuments(documents);
-      await new Promise(resolve => setTimeout(resolve, 2000));
-      
+      await new Promise((resolve) => setTimeout(resolve, 500));
+
       // Test MMR search - should return diverse results
       const mmrResults = await vectorStore.maxMarginalRelevanceSearch('Apple fruit', {
         k: 3,
@@ -324,6 +328,156 @@ describe('LambdaDB Comprehensive Integration Tests', () => {
     }, 90000);
   });
 
+  describe('Delete Operations', () => {
+    it('should throw when delete() is called without params', async () => {
+      await vectorStore.createCollection();
+      await expect(vectorStore.delete()).rejects.toThrow('delete() requires explicit params');
+      await expect(vectorStore.delete({})).rejects.toThrow('delete() requires explicit params');
+    }, 30000);
+
+    it('should delete documents by ids', async () => {
+      await vectorStore.createCollection();
+      const documents = [
+        new Document({ pageContent: 'Keep this document', metadata: { tag: 'keep' } }),
+        new Document({ pageContent: 'Remove this document', metadata: { tag: 'remove' } }),
+        new Document({ pageContent: 'Another to remove', metadata: { tag: 'remove' } }),
+      ];
+      const ids = (await vectorStore.addDocuments(documents)) as string[];
+      expect(ids).toHaveLength(3);
+
+      await new Promise((r) => setTimeout(r, 500));
+
+      await vectorStore.delete({ ids: [ids[1], ids[2]] });
+
+      await new Promise((r) => setTimeout(r, 500));
+
+      const results = await vectorStore.similaritySearch('document', 5);
+      expect(results).toHaveLength(1);
+      expect(results[0].pageContent).toContain('Keep this document');
+    }, 90000);
+
+    it('should delete all documents with deleteAll: true', async () => {
+      await vectorStore.createCollection();
+      await vectorStore.addDocuments([
+        new Document({ pageContent: 'Doc A' }),
+        new Document({ pageContent: 'Doc B' }),
+      ]);
+      await new Promise((r) => setTimeout(r, 500));
+
+      await vectorStore.delete({ deleteAll: true });
+      await new Promise((r) => setTimeout(r, 500));
+
+      const info = await vectorStore.getCollectionInfo();
+      expect(info.documentCount).toBe(0);
+    }, 90000);
+
+    it('should delete documents by filter when field is in indexConfigs', async () => {
+      // LambdaDB only indexes fields listed in indexConfigs at collection creation
+      const filterCollectionName = `test_filter_del_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
+      const filterStore = new LambdaDBVectorStore(embeddings, {
+        projectApiKey: process.env.LAMBDADB_API_KEY!,
+        ...(process.env.LAMBDADB_SERVER_URL && { serverURL: process.env.LAMBDADB_SERVER_URL }),
+        collectionName: filterCollectionName,
+        vectorDimensions: 3,
+        similarityMetric: 'cosine',
+        defaultConsistentRead: true,
+        indexConfig: { kind: { type: 'keyword' } }, // must be indexed to filter/delete by kind
+        retryOptions: { maxAttempts: 2, initialDelay: 100 },
+      });
+      try {
+        await filterStore.createCollection();
+        const documents = [
+          new Document({ pageContent: 'Apple fruit', metadata: { kind: 'fruit' } }),
+          new Document({ pageContent: 'Carrot vegetable', metadata: { kind: 'vegetable' } }),
+          new Document({ pageContent: 'Banana fruit', metadata: { kind: 'fruit' } }),
+        ];
+        await filterStore.addDocuments(documents);
+        await new Promise((r) => setTimeout(r, 500));
+
+        await filterStore.delete({ filter: { queryString: { query: 'kind:vegetable' } } });
+        await new Promise((r) => setTimeout(r, 500));
+
+        const results = await filterStore.similaritySearch('food', 5);
+        expect(results).toHaveLength(2);
+        expect(results.every((d) => d.metadata?.kind === 'fruit')).toBe(true);
+      } finally {
+        await filterStore.deleteCollection();
+      }
+    }, 90000);
+  });
+
+  describe('Search with Filter', () => {
+    it('should filter by metadata when field is in indexConfigs (query string)', async () => {
+      const filterCollectionName = `test_filter_srch_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
+      const filterStore = new LambdaDBVectorStore(embeddings, {
+        projectApiKey: process.env.LAMBDADB_API_KEY!,
+        ...(process.env.LAMBDADB_SERVER_URL && { serverURL: process.env.LAMBDADB_SERVER_URL }),
+        collectionName: filterCollectionName,
+        vectorDimensions: 3,
+        similarityMetric: 'cosine',
+        defaultConsistentRead: true,
+        indexConfig: { lang: { type: 'keyword' } },
+        retryOptions: { maxAttempts: 2, initialDelay: 100 },
+      });
+      try {
+        await filterStore.createCollection();
+        const documents = [
+          new Document({ pageContent: 'JavaScript for frontend', metadata: { lang: 'js' } }),
+          new Document({ pageContent: 'Python for backend', metadata: { lang: 'py' } }),
+          new Document({ pageContent: 'TypeScript for frontend', metadata: { lang: 'ts' } }),
+        ];
+        await filterStore.addDocuments(documents);
+        await new Promise((r) => setTimeout(r, 500));
+
+        const results = await filterStore.similaritySearch('programming', 3, 'lang:py');
+        expect(Array.isArray(results)).toBe(true);
+        results.forEach((d) => {
+          expect(d).toBeInstanceOf(Document);
+          expect(d.pageContent).toBeDefined();
+        });
+        expect(results.every((d) => d.metadata?.lang === 'py')).toBe(true);
+      } finally {
+        await filterStore.deleteCollection();
+      }
+    }, 90000);
+
+    it('should filter by metadata when field is in indexConfigs (filter object)', async () => {
+      const filterCollectionName = `test_filter_obj_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
+      const filterStore = new LambdaDBVectorStore(embeddings, {
+        projectApiKey: process.env.LAMBDADB_API_KEY!,
+        ...(process.env.LAMBDADB_SERVER_URL && { serverURL: process.env.LAMBDADB_SERVER_URL }),
+        collectionName: filterCollectionName,
+        vectorDimensions: 3,
+        similarityMetric: 'cosine',
+        defaultConsistentRead: true,
+        indexConfig: { color: { type: 'keyword' } },
+        retryOptions: { maxAttempts: 2, initialDelay: 100 },
+      });
+      try {
+        await filterStore.createCollection();
+        const documents = [
+          new Document({ pageContent: 'Red apple', metadata: { color: 'red' } }),
+          new Document({ pageContent: 'Green apple', metadata: { color: 'green' } }),
+          new Document({ pageContent: 'Blue berry', metadata: { color: 'blue' } }),
+        ];
+        await filterStore.addDocuments(documents);
+        await new Promise((r) => setTimeout(r, 500));
+
+        const results = await filterStore.similaritySearchWithScore('fruit', 3, {
+          queryString: { query: 'color:red' },
+        });
+        expect(Array.isArray(results)).toBe(true);
+        results.forEach(([doc, score]) => {
+          expect(doc).toBeInstanceOf(Document);
+          expect(typeof score).toBe('number');
+        });
+        expect(results.every(([doc]) => doc.metadata?.color === 'red')).toBe(true);
+      } finally {
+        await filterStore.deleteCollection();
+      }
+    }, 90000);
+  });
+
   describe('Error Handling', () => {
     it('should handle invalid vector dimensions', async () => {
       await vectorStore.createCollection();
@@ -371,11 +525,10 @@ describe('LambdaDB Comprehensive Integration Tests', () => {
       const duration = Date.now() - startTime;
       
       console.log(`📊 Added ${batchSize} documents in ${duration}ms`);
-      expect(duration).toBeLessThan(30000); // Should complete within 30 seconds
-      
-      // Wait for indexing
-      await new Promise(resolve => setTimeout(resolve, 3000));
-      
+      expect(duration).toBeLessThan(30000);
+
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+
       // Test search across batch
       const searchResults = await vectorStore.similaritySearch('topic 2', 5);
       expect(searchResults).toHaveLength(5);
