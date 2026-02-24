@@ -1,6 +1,6 @@
 {
   "name": "@functional-systems/langchain-lambdadb",
-  "version": "0.1.0",
+  "version": "0.2.0-dev.0",
   "description": "LangChain integration for LambdaDB vector database",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -39,17 +39,23 @@
   ],
   "author": "",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lambdadb/langchain-lambdadb-js"
+  },
   "dependencies": {
     "@functional-systems/lambdadb": "0.3.0-dev.3",
     "@langchain/core": "^0.3.77"
   },
   "devDependencies": {
+    "@eslint/js": "^9.36.0",
     "@types/node": "^24.5.2",
     "@vitest/ui": "^3.2.4",
     "dotenv": "^17.3.1",
     "eslint": "^9.36.0",
     "prettier": "^3.6.2",
     "typescript": "^5.9.2",
+    "typescript-eslint": "^8.30.0",
     "vitest": "^3.2.4"
   }
 }
