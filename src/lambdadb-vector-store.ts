@@ -194,11 +194,11 @@ export class LambdaDBVectorStore extends VectorStore {
   }
 
   /**
-   * Create a new collection with vector index
+   * Create a new collection with vector index.
+   * Waits for CREATING → ACTIVE before resolving (LambdaDB creates asynchronously).
    */
   async createCollection(options?: Partial<CreateCollectionOptions>): Promise<void> {
     try {
-      // Create collection with proper index configuration (0.3.x: createCollection takes request body)
       await withRetry(async () => {
         await this.client.createCollection({
           collectionName: this.config.collectionName,
@@ -217,7 +217,6 @@ export class LambdaDBVectorStore extends VectorStore {
         });
       }, this.retryOptions);
 
-      // Wait for collection to become ACTIVE before proceeding
       await this.waitForCollectionActive();
     } catch (error) {
       throw handleLambdaDBError(error);
@@ -225,7 +224,8 @@ export class LambdaDBVectorStore extends VectorStore {
   }
 
   /**
-   * Wait for collection to become ACTIVE
+   * Wait for collection to become ACTIVE (CREATING → ACTIVE).
+   * LambdaDB creates asynchronously; createCollection() uses this so callers see ACTIVE.
    */
   private async waitForCollectionActive(maxWaitTimeMs: number = 30000): Promise<void> {
     const startTime = Date.now();
@@ -260,12 +260,24 @@ export class LambdaDBVectorStore extends VectorStore {
   }
 
   /**
-   * Delete the collection
+   * Delete the collection. LambdaDB deletes asynchronously (DELETING → removed);
+   * once DELETING, eventual removal is guaranteed. Does not wait for removal.
+   * Resolves without throwing if already gone (404) or already DELETING (400 "in DELETING state").
    */
   async deleteCollection(): Promise<void> {
     try {
       await this.collection.delete();
-    } catch (error) {
+    } catch (error: unknown) {
+      const err = error as {
+        status?: number;
+        statusCode?: number;
+        body?: { message?: string };
+        message?: string;
+      };
+      const status = err.status ?? err.statusCode;
+      const message = err.body?.message ?? err.message ?? '';
+      if (status === 404) return; // already deleted
+      if (status === 400 && String(message).includes('DELETING state')) return; // delete already in progress
       throw handleLambdaDBError(error);
     }
   }
