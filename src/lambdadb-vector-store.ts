@@ -238,10 +238,6 @@ export class LambdaDBVectorStore extends VectorStore {
         if (info.status === 'ACTIVE') {
           return; // Collection is ready
         }
-        
-        if (info.status === 'FAILED' || info.status === 'ERROR') {
-          throw new Error(`Collection creation failed with status: ${info.status}`);
-        }
 
         // Wait before next poll
         await new Promise(resolve => setTimeout(resolve, pollInterval));
@@ -504,24 +500,33 @@ export class LambdaDBVectorStore extends VectorStore {
   }
 
   /**
-   * Ensure the collection exists, create if it doesn't
+   * Ensure the collection exists, create if it doesn't.
+   * Uses collection.get() (via getCollectionInfo()) for O(1) lookup instead of listCollections(),
+   * avoiding unnecessary overhead when the project has many collections.
    */
   private async ensureCollectionExists(): Promise<void> {
     try {
-      const response = await this.client.listCollections();
-      const collectionExists = response.collections?.some(
-        (c: { collectionName: string }) => c.collectionName === this.config.collectionName
-      );
-
-      if (!collectionExists) {
-        await this.createCollection();
+      const info = await this.getCollectionInfo();
+      if (info.status === "ACTIVE") {
+        return;
       }
-    } catch (error) {
-      try {
-        await this.createCollection();
-      } catch (createError) {
-        // Collection might already exist (race condition)
+      if (info.status === "CREATING") {
+        await this.waitForCollectionActive();
+        return;
       }
+      // Other status (e.g. transitioning): wait for ACTIVE
+      await this.waitForCollectionActive();
+    } catch (error: unknown) {
+      const err = error as { name?: string; status?: number; statusCode?: number };
+      const isNotFound =
+        err.name === "LambdaDBResourceNotFoundError" ||
+        err.status === 404 ||
+        err.statusCode === 404;
+      if (isNotFound) {
+        await this.createCollection();
+        return;
+      }
+      throw handleLambdaDBError(error);
     }
   }
 

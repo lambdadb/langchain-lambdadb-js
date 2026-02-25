@@ -21,9 +21,6 @@ async function waitForCollectionActive(
     const col = list.collections?.find((c: { collectionName?: string }) => c.collectionName === collectionName);
     const status = (col as { collectionStatus?: string } | undefined)?.collectionStatus;
     if (status === 'ACTIVE') return;
-    if (status === 'FAILED' || status === 'ERROR') {
-      throw new Error(`Collection entered ${status}`);
-    }
     await new Promise((r) => setTimeout(r, pollIntervalMs));
   }
   throw new Error(`Collection did not become ACTIVE within ${maxWaitMs}ms`);
