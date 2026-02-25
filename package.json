@@ -1,6 +1,6 @@
 {
   "name": "@functional-systems/langchain-lambdadb",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "LangChain integration for LambdaDB vector database",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
