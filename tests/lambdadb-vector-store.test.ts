@@ -1,11 +1,13 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { LambdaDBClient } from '@functional-systems/lambdadb';
 import { LambdaDBVectorStore } from '../src/lambdadb-vector-store.js';
-import { LambdaDBConfig } from '../src/types.js';
+import { LambdaDBVectorStoreConfig } from '../src/types.js';
 import { Document } from '@langchain/core/documents';
 import { EmbeddingsInterface } from '@langchain/core/embeddings';
 
 // Mock LambdaDB 0.3.x client (LambdaDBClient + CollectionHandle)
 const mockCollectionHandle = {
+  collectionName: 'test-collection',
   get: vi.fn().mockResolvedValue({
     collection: {
       collectionName: 'test-collection',
@@ -32,6 +34,7 @@ const mockCollectionHandle = {
   }),
   docs: {
     upsert: vi.fn().mockResolvedValue({}),
+    bulkUpsertDocs: vi.fn().mockResolvedValue({}),
     delete: vi.fn().mockResolvedValue({}),
     listAll: vi.fn().mockResolvedValue({ docs: [], total: 0 }),
   }
@@ -52,15 +55,14 @@ const mockEmbeddings: EmbeddingsInterface = {
 };
 
 describe('LambdaDBVectorStore', () => {
-  let config: LambdaDBConfig;
+  let config: LambdaDBVectorStoreConfig;
+  let mockClient: LambdaDBClient;
   let vectorStore: LambdaDBVectorStore;
 
   beforeEach(() => {
+    mockClient = new LambdaDBClient({} as any);
     config = {
-      projectApiKey: 'test-api-key',
-      collectionName: 'test-collection',
-      vectorDimensions: 3,
-      similarityMetric: 'cosine',
+      collection: mockClient.collection('test-collection'),
     };
 
     vectorStore = new LambdaDBVectorStore(mockEmbeddings, config);
@@ -75,14 +77,18 @@ describe('LambdaDBVectorStore', () => {
 
     it('should validate required configuration', () => {
       const invalidConfig = {
-        projectApiKey: '',
-        collectionName: 'test',
-        vectorDimensions: 3,
+        collection: null,
       };
 
       expect(() => {
-        new LambdaDBVectorStore(mockEmbeddings, invalidConfig as LambdaDBConfig);
-      }).toThrow('projectApiKey is required');
+        new LambdaDBVectorStore(mockEmbeddings, invalidConfig as LambdaDBVectorStoreConfig);
+      }).toThrow(/collection is required/);
+    });
+
+    it('should throw when collection is null', () => {
+      expect(() => {
+        new LambdaDBVectorStore(mockEmbeddings, { ...config, collection: null as any });
+      }).toThrow('collection is required');
     });
   });
 
@@ -122,9 +128,9 @@ describe('LambdaDBVectorStore', () => {
       expect(vectorStore['collection'].docs.upsert).toHaveBeenCalledWith({
         docs: expect.arrayContaining([
           expect.objectContaining({
-            content: 'Document 1',
+            page_content: 'Document 1',
             vector: [0.1, 0.2, 0.3],
-            id: '1'
+            id: expect.any(String),
           })
         ])
       });
@@ -159,7 +165,7 @@ describe('LambdaDBVectorStore', () => {
             k: k
           }
         },
-        consistentRead: true,
+        consistentRead: false,
       });
 
       expect(results).toHaveLength(1);
@@ -192,7 +198,7 @@ describe('LambdaDBVectorStore', () => {
             filter: lambdadbFilter,
           },
         },
-        consistentRead: true,
+        consistentRead: false,
       });
     });
 
@@ -212,7 +218,7 @@ describe('LambdaDBVectorStore', () => {
             filter: { queryString: { query: 'category:tech' } },
           },
         },
-        consistentRead: true,
+        consistentRead: false,
       });
     });
 
@@ -232,9 +238,17 @@ describe('LambdaDBVectorStore', () => {
             k,
           },
         },
-        consistentRead: true,
+        consistentRead: false,
       });
       expect(results).toHaveLength(0);
+    });
+
+    it('should pass options.consistentRead to query (per-call override)', async () => {
+      const queryVector = [0.1, 0.2, 0.3];
+      await vectorStore.similaritySearchVectorWithScore(queryVector, 2, undefined, { consistentRead: true });
+      expect(vectorStore['collection'].query).toHaveBeenCalledWith(
+        expect.objectContaining({ consistentRead: true })
+      );
     });
   });
 
@@ -398,26 +412,4 @@ describe('LambdaDBVectorStore', () => {
     });
   });
 
-  describe('collection management', () => {
-    it('should create collection with correct configuration', async () => {
-      await vectorStore.createCollection();
-
-      expect(vectorStore['client'].createCollection).toHaveBeenCalledWith({
-        collectionName: 'test-collection',
-        indexConfigs: {
-          vector: {
-            type: 'vector',
-            dimensions: 3,
-            similarity: 'cosine',
-          }
-        }
-      });
-    }, 10000);
-
-    it('should delete collection', async () => {
-      await vectorStore.deleteCollection();
-
-      expect(vectorStore['collection'].delete).toHaveBeenCalledWith();
-    });
-  });
 });

@@ -2,17 +2,15 @@ import { VectorStore } from "@langchain/core/vectorstores";
 import { Document } from "@langchain/core/documents";
 import { EmbeddingsInterface } from "@langchain/core/embeddings";
 import { maximalMarginalRelevance } from "@langchain/core/utils/math";
-import { LambdaDBClient } from "@functional-systems/lambdadb";
 
 import {
-  LambdaDBConfig,
-  CreateCollectionOptions,
+  LambdaDBVectorStoreConfig,
   DocumentFilter,
   DeleteOptions,
   MaxMarginalRelevanceSearchOptions,
   CollectionInfo,
-  RetryOptions,
   type LambdaDBFilterObject,
+  type VectorSearchOptions,
 } from "./types.js";
 import {
   lambdaDBToDocument,
@@ -20,59 +18,63 @@ import {
   validateVectorDimensions,
   handleLambdaDBError,
   generateDocumentId,
-  batchArray,
-  withRetry,
+  UPSERT_PAYLOAD_SIZE_THRESHOLD_BYTES,
   toLambdaDBFilter,
-  DEFAULT_RETRY_OPTIONS,
 } from "./utils.js";
 
 /**
- * LambdaDB vector store implementation for LangChain
+ * LambdaDB vector store implementation for LangChain.
+ * Constructor and static methods match base VectorStore signatures; pass collection via config.collection.
  */
 export class LambdaDBVectorStore extends VectorStore {
   declare FilterType: DocumentFilter | LambdaDBFilterObject | string;
 
-  private client: LambdaDBClient;
-  private collection: ReturnType<LambdaDBClient["collection"]>;
-  private config: LambdaDBConfig;
+  private collection: LambdaDBVectorStoreConfig["collection"];
+  private config: LambdaDBVectorStoreConfig;
   private textField: string;
   private vectorField: string;
-  private retryOptions: RetryOptions;
+  private _vectorDimensions: number | null = null;
 
-  constructor(embeddings: EmbeddingsInterface, config: LambdaDBConfig) {
+  constructor(embeddings: EmbeddingsInterface, config: LambdaDBVectorStoreConfig) {
     super(embeddings, config);
-    
+
     validateConfig(config);
-    
+
+    this.collection = config.collection;
     // Set configuration with defaults
     this.config = {
-      textField: "content",
-      vectorField: "vector", // Use 'vector' to match LambdaDB conventions
-      validateCollection: false,
-      defaultConsistentRead: true, // Use consistent reads by default for immediate consistency
+      textField: "page_content",
+      vectorField: "vector",
+      defaultConsistentRead: false,
       ...config,
     };
-    
+
     this.textField = this.config.textField!;
     this.vectorField = this.config.vectorField!;
-    this.retryOptions = { ...DEFAULT_RETRY_OPTIONS, ...(config.retryOptions || {}) };
-    
-    // Initialize LambdaDB client (0.3.x SDK). Prefer baseUrl + projectName; serverURL supported for backward compatibility.
-    this.client = new LambdaDBClient({
-      projectApiKey: config.projectApiKey,
-      ...(config.baseUrl && { baseUrl: config.baseUrl }),
-      ...(config.projectName && { projectName: config.projectName }),
-      ...(config.serverURL && { serverURL: config.serverURL }),
-      timeoutMs: 30000,
-    });
-    this.collection = this.client.collection(this.config.collectionName);
-    
-    // Validate collection exists if requested
-    if (this.config.validateCollection) {
-      this.validateCollectionExists().catch((error) => {
-        throw new Error(`Collection validation failed: ${error.message}`);
-      });
+  }
+
+  /** Throw a clear error if the failure is due to collection not existing (404). */
+  private throwIfCollectionNotFound(error: unknown): void {
+    const err = error as { status?: number; statusCode?: number };
+    if (err.status === 404 || err.statusCode === 404) {
+      const name = (this.collection as { collectionName?: string }).collectionName;
+      const namePart = name ? ` '${name}'` : "";
+      throw new Error(
+        `Collection${namePart} does not exist. Create it first using the LambdaDB client (e.g. client.createCollection({ collectionName, indexConfigs: { ... } })), then try again.`
+      );
     }
+  }
+
+  /**
+   * Get vector dimension from embeddings (cached after first call).
+   */
+  private async getVectorDimensions(): Promise<number> {
+    if (this._vectorDimensions != null) {
+      return this._vectorDimensions;
+    }
+    const vec = await this.embeddings.embedQuery("x");
+    this._vectorDimensions = vec.length;
+    return this._vectorDimensions;
   }
 
   /**
@@ -107,9 +109,8 @@ export class LambdaDBVectorStore extends VectorStore {
         throw new Error("Vectors and documents length mismatch");
       }
       if (vectors.length > 0) {
-        validateVectorDimensions(vectors[0], this.config.vectorDimensions);
+        validateVectorDimensions(vectors[0], await this.getVectorDimensions());
       }
-      await this.ensureCollectionExists();
 
       const lambdaDBDocs = vectors.map((vector, idx) => {
         const doc = documents[idx];
@@ -122,15 +123,15 @@ export class LambdaDBVectorStore extends VectorStore {
         } as Record<string, unknown>;
       });
 
-      const batchSize = 100;
-      const batches = batchArray(lambdaDBDocs, batchSize);
-      for (const batch of batches) {
-        await withRetry(async () => {
-          await this.collection.docs.upsert({ docs: batch });
-        }, this.retryOptions);
+      const payloadSize = new TextEncoder().encode(JSON.stringify(lambdaDBDocs)).length;
+      if (payloadSize <= UPSERT_PAYLOAD_SIZE_THRESHOLD_BYTES) {
+        await this.collection.docs.upsert({ docs: lambdaDBDocs });
+      } else {
+        await this.collection.docs.bulkUpsertDocs({ docs: lambdaDBDocs });
       }
       return lambdaDBDocs.map((d) => d.id as string);
-    } catch (error) {
+    } catch (error: unknown) {
+      this.throwIfCollectionNotFound(error);
       throw handleLambdaDBError(error);
     }
   }
@@ -138,14 +139,16 @@ export class LambdaDBVectorStore extends VectorStore {
   /**
    * Perform similarity search with scores.
    * Filter: object or string → LambdaDB knn.filter (server-side). Function → applied client-side after fetch.
+   * options.consistentRead overrides defaultConsistentRead for this call.
    */
   async similaritySearchVectorWithScore(
     query: number[],
     k: number,
-    filter?: DocumentFilter | LambdaDBFilterObject | string
+    filter?: DocumentFilter | LambdaDBFilterObject | string,
+    options?: VectorSearchOptions
   ): Promise<[Document, number][]> {
     try {
-      validateVectorDimensions(query, this.config.vectorDimensions);
+      validateVectorDimensions(query, await this.getVectorDimensions());
 
       const apiFilter = toLambdaDBFilter(filter);
       const knn: Record<string, unknown> = {
@@ -157,13 +160,12 @@ export class LambdaDBVectorStore extends VectorStore {
         knn.filter = apiFilter;
       }
 
-      const response = await withRetry(async () => {
-        return await this.collection.query({
-          size: k,
-          query: { knn },
-          consistentRead: this.config.defaultConsistentRead,
-        });
-      }, this.retryOptions);
+      const consistentRead = options?.consistentRead ?? this.config.defaultConsistentRead;
+      const response = await this.collection.query({
+        size: k,
+        query: { knn },
+        consistentRead,
+      });
 
       const formattedResults: [Document, number][] = response.docs.map((result) => {
         const doc = lambdaDBToDocument(result.doc, this.textField);
@@ -176,106 +178,25 @@ export class LambdaDBVectorStore extends VectorStore {
       }
       return formattedResults;
     } catch (error) {
+      this.throwIfCollectionNotFound(error);
       throw handleLambdaDBError(error);
     }
   }
 
   /**
-   * Perform similarity search without scores
+   * Perform similarity search without scores.
+   * options.consistentRead overrides defaultConsistentRead for this call.
    */
   async similaritySearch(
     query: string,
     k = 4,
-    filter?: DocumentFilter | LambdaDBFilterObject | string
+    filter?: DocumentFilter | LambdaDBFilterObject | string,
+    _callbacks?: unknown,
+    options?: VectorSearchOptions
   ): Promise<Document[]> {
     const embeddings = await this.embeddings.embedQuery(query);
-    const results = await this.similaritySearchVectorWithScore(embeddings, k, filter);
+    const results = await this.similaritySearchVectorWithScore(embeddings, k, filter, options);
     return results.map(([doc]) => doc);
-  }
-
-  /**
-   * Create a new collection with vector index.
-   * Waits for CREATING → ACTIVE before resolving (LambdaDB creates asynchronously).
-   */
-  async createCollection(options?: Partial<CreateCollectionOptions>): Promise<void> {
-    try {
-      await withRetry(async () => {
-        await this.client.createCollection({
-          collectionName: this.config.collectionName,
-          indexConfigs: {
-            [this.vectorField]: {
-              type: "vector" as const,
-              dimensions: this.config.vectorDimensions,
-              similarity: (this.config.similarityMetric?.toLowerCase() || "cosine") as "cosine" | "euclidean" | "dot_product" | "max_inner_product",
-            },
-            ...(this.config.indexConfig || {}),
-            ...(options?.indexConfig || {}),
-          },
-          ...(this.config.partitionConfig || options?.partitionConfig
-            ? { partitionConfig: options?.partitionConfig ?? this.config.partitionConfig }
-            : {}),
-        });
-      }, this.retryOptions);
-
-      await this.waitForCollectionActive();
-    } catch (error) {
-      throw handleLambdaDBError(error);
-    }
-  }
-
-  /**
-   * Wait for collection to become ACTIVE (CREATING → ACTIVE).
-   * LambdaDB creates asynchronously; createCollection() uses this so callers see ACTIVE.
-   */
-  private async waitForCollectionActive(maxWaitTimeMs: number = 30000): Promise<void> {
-    const startTime = Date.now();
-    const pollInterval = 1000; // Check every 1 second
-
-    while (Date.now() - startTime < maxWaitTimeMs) {
-      try {
-        const info = await this.getCollectionInfo();
-        
-        if (info.status === 'ACTIVE') {
-          return; // Collection is ready
-        }
-
-        // Wait before next poll
-        await new Promise(resolve => setTimeout(resolve, pollInterval));
-        
-      } catch (error) {
-        // If we can't get collection info, it might still be creating
-        if (Date.now() - startTime < maxWaitTimeMs) {
-          await new Promise(resolve => setTimeout(resolve, pollInterval));
-          continue;
-        }
-        throw error;
-      }
-    }
-
-    throw new Error(`Collection did not become ACTIVE within ${maxWaitTimeMs}ms`);
-  }
-
-  /**
-   * Delete the collection. LambdaDB deletes asynchronously (DELETING → removed);
-   * once DELETING, eventual removal is guaranteed. Does not wait for removal.
-   * Resolves without throwing if already gone (404) or already DELETING (400 "in DELETING state").
-   */
-  async deleteCollection(): Promise<void> {
-    try {
-      await this.collection.delete();
-    } catch (error: unknown) {
-      const err = error as {
-        status?: number;
-        statusCode?: number;
-        body?: { message?: string };
-        message?: string;
-      };
-      const status = err.status ?? err.statusCode;
-      const message = err.body?.message ?? err.message ?? '';
-      if (status === 404) return; // already deleted
-      if (status === 400 && String(message).includes('DELETING state')) return; // delete already in progress
-      throw handleLambdaDBError(error);
-    }
   }
 
   /**
@@ -348,6 +269,7 @@ export class LambdaDBVectorStore extends VectorStore {
         throw new Error("Must provide either ids, filter, or deleteAll option");
       }
     } catch (error) {
+      this.throwIfCollectionNotFound(error);
       throw handleLambdaDBError(error);
     }
   }
@@ -362,10 +284,11 @@ export class LambdaDBVectorStore extends VectorStore {
     _callbacks?: any
   ): Promise<Document[]> {
     const { k = 4, fetchK = 20, lambda = 0.5, filter } = options;
+    const consistentRead = options.consistentRead ?? this.config.defaultConsistentRead;
 
     try {
       const queryVector = await this.embeddings.embedQuery(query);
-      validateVectorDimensions(queryVector, this.config.vectorDimensions);
+      validateVectorDimensions(queryVector, await this.getVectorDimensions());
 
       const apiFilter = toLambdaDBFilter(
         filter as DocumentFilter | LambdaDBFilterObject | string | undefined
@@ -379,14 +302,12 @@ export class LambdaDBVectorStore extends VectorStore {
         knn.filter = apiFilter;
       }
 
-      const response = await withRetry(async () => {
-        return await this.collection.query({
-          size: fetchK,
-          query: { knn },
-          consistentRead: this.config.defaultConsistentRead,
-          includeVectors: true,
-        });
-      }, this.retryOptions);
+      const response = await this.collection.query({
+        size: fetchK,
+        query: { knn },
+        consistentRead,
+        includeVectors: true,
+      });
 
       const candidates: { doc: Document; score: number; vector: number[] }[] = [];
       for (const result of response.docs ?? []) {
@@ -410,6 +331,7 @@ export class LambdaDBVectorStore extends VectorStore {
       const selectedIndexes = maximalMarginalRelevance(queryVector, embeddingList, lambda, k);
       return selectedIndexes.map((i) => list[i].doc);
     } catch (error) {
+      this.throwIfCollectionNotFound(error);
       throw handleLambdaDBError(error);
     }
   }
@@ -423,7 +345,7 @@ export class LambdaDBVectorStore extends VectorStore {
       const col = response.collection;
 
       return {
-        name: col.collectionName ?? this.config.collectionName,
+        name: col.collectionName ?? (this.collection as { collectionName?: string }).collectionName ?? "",
         status: col.collectionStatus ?? "unknown",
         documentCount: col.numDocs,
         indexConfigs: col.indexConfigs,
@@ -431,18 +353,20 @@ export class LambdaDBVectorStore extends VectorStore {
         updatedAt: undefined,
       };
     } catch (error) {
+      this.throwIfCollectionNotFound(error);
       throw handleLambdaDBError(error);
     }
   }
 
   /**
-   * Static method to create LambdaDBVectorStore from texts
+   * Static method to create LambdaDBVectorStore from texts.
+   * Pass client via config.client to reuse the same client across collections.
    */
   static async fromTexts(
     texts: string[],
     metadatas: object[] | object,
     embeddings: EmbeddingsInterface,
-    config: LambdaDBConfig
+    config: LambdaDBVectorStoreConfig
   ): Promise<LambdaDBVectorStore> {
     const docs = texts.map((text, idx) => {
       const metadata = Array.isArray(metadatas) ? metadatas[idx] || {} : metadatas || {};
@@ -453,27 +377,17 @@ export class LambdaDBVectorStore extends VectorStore {
   }
 
   /**
-   * Static method to create LambdaDBVectorStore from documents
+   * Static method to create LambdaDBVectorStore from documents.
+   * Pass client via config.client to reuse the same client across collections.
    */
   static async fromDocuments(
     docs: Document[],
     embeddings: EmbeddingsInterface,
-    config: LambdaDBConfig
+    config: LambdaDBVectorStoreConfig
   ): Promise<LambdaDBVectorStore> {
     const instance = new LambdaDBVectorStore(embeddings, config);
     await instance.addDocuments(docs);
     return instance;
-  }
-
-  /**
-   * Validate that the collection exists
-   */
-  private async validateCollectionExists(): Promise<void> {
-    try {
-      await this.collection.get();
-    } catch (error) {
-      throw new Error(`Collection '${this.config.collectionName}' does not exist: ${error}`);
-    }
   }
 
   /**
@@ -495,48 +409,8 @@ export class LambdaDBVectorStore extends VectorStore {
       }
       return documents;
     } catch (error) {
+      this.throwIfCollectionNotFound(error);
       throw handleLambdaDBError(error);
     }
-  }
-
-  /**
-   * Ensure the collection exists, create if it doesn't.
-   * Uses collection.get() (via getCollectionInfo()) for O(1) lookup instead of listCollections(),
-   * avoiding unnecessary overhead when the project has many collections.
-   */
-  private async ensureCollectionExists(): Promise<void> {
-    try {
-      const info = await this.getCollectionInfo();
-      if (info.status === "ACTIVE") {
-        return;
-      }
-      if (info.status === "CREATING") {
-        await this.waitForCollectionActive();
-        return;
-      }
-      // Other status (e.g. transitioning): wait for ACTIVE
-      await this.waitForCollectionActive();
-    } catch (error: unknown) {
-      const err = error as { name?: string; status?: number; statusCode?: number };
-      const isNotFound =
-        err.name === "LambdaDBResourceNotFoundError" ||
-        err.status === 404 ||
-        err.statusCode === 404;
-      if (isNotFound) {
-        await this.createCollection();
-        return;
-      }
-      throw handleLambdaDBError(error);
-    }
-  }
-
-  /**
-   * Convert LangChain filter to LambdaDB format
-   * This is a placeholder - actual implementation depends on LambdaDB's filter syntax
-   */
-  private convertFilterToLambdaDB(_filter: DocumentFilter): any {
-    // This would need to be implemented based on LambdaDB's filter syntax
-    // For now, return undefined to handle filtering client-side
-    return undefined;
   }
 }

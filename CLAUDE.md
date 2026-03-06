@@ -7,9 +7,9 @@
 
 ```typescript
 // ❌ WRONG - causes timeouts
-new LambdaDB({
+new LambdaDBClient({
   projectApiKey: apiKey,
-  serverUrl: serverUrl  // Wrong parameter name!
+  serverUrl: serverUrl  // Wrong parameter name! Use serverURL (capital URL)
 });
 
 // ✅ CORRECT (prefer baseUrl + projectName)
@@ -91,7 +91,7 @@ Documents in LambdaDB are stored as flat objects:
 // Vector store converts LangChain Document to:
 {
   id: "generated_id",
-  content: "document text",     // configurable field name
+  page_content: "document text", // configurable field name (default textField)
   vector: [0.1, 0.2, 0.3],     // configurable field name
   // metadata fields are spread directly
   metadata_field1: "value",
@@ -104,27 +104,42 @@ Documents in LambdaDB are stored as flat objects:
 ### Working Integration Test Structure
 ```typescript
 describe('LambdaDB Integration', () => {
-  const createVectorStore = () => {
-    const collectionName = `test_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
-    
-    return new LambdaDBVectorStore(embeddings, {
-      projectApiKey: process.env.LAMBDADB_API_KEY!,
-      ...(process.env.LAMBDADB_SERVER_URL && { serverURL: process.env.LAMBDADB_SERVER_URL }),
-      collectionName,
-      vectorDimensions: 3,
-      similarityMetric: 'cosine',
-      retryOptions: { maxAttempts: 2, initialDelay: 100 } // Shorter retries for tests
-    });
-  };
+  let client: LambdaDBClient;
+  let vectorStore: LambdaDBVectorStore;
+  let collectionName: string;
 
-  const safeCleanup = async (vectorStore, collectionName) => {
+  beforeEach(() => {
+    client = new LambdaDBClient({
+      projectApiKey: process.env.LAMBDADB_PROJECT_API_KEY!,
+      baseUrl: process.env.LAMBDADB_BASE_URL,
+      projectName: process.env.LAMBDADB_PROJECT_NAME,
+      timeoutMs: 30000,
+    });
+    collectionName = `test_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
+    vectorStore = new LambdaDBVectorStore(embeddings, {
+      collection: client.collection(collectionName),
+    });
+  });
+
+  afterEach(async () => {
     try {
-      await vectorStore.deleteCollection();
-      console.log(`🧹 Cleaned up: ${collectionName}`);
-    } catch (error) {
-      console.warn(`⚠️ Cleanup failed: ${error.message}`);
-    }
-  };
+      await client.collection(collectionName).delete();
+    } catch {}
+  });
+
+  it('should add and search', async () => {
+    // Create collection via client first (vector store assumes it exists)
+    await client.createCollection({
+      collectionName,
+      indexConfigs: {
+        vector: { type: 'vector', dimensions: 3, similarity: 'cosine' },
+        page_content: { type: 'text', analyzers: ['english'] },
+      },
+    });
+    await vectorStore.addDocuments([new Document({ pageContent: 'Hello' })]);
+    const results = await vectorStore.similaritySearch('Hi', 1);
+    expect(results).toHaveLength(1);
+  });
 });
 ```
 
@@ -157,8 +172,9 @@ class TestEmbeddings implements EmbeddingsInterface {
 ### Test LambdaDB Connectivity
 ```bash
 # Test environment variables
-echo "API Key: ${LAMBDADB_API_KEY:0:10}..."
-echo "Server URL: $LAMBDADB_SERVER_URL"
+echo "API Key: ${LAMBDADB_PROJECT_API_KEY:0:10}..."
+echo "Base URL: $LAMBDADB_BASE_URL"
+echo "Project: $LAMBDADB_PROJECT_NAME"
 
 # Run integration tests
 npm run test:integration
@@ -169,29 +185,28 @@ npx vitest run tests/integration/comprehensive.int.test.ts --reporter=verbose
 
 ### Direct LambdaDB Client Testing
 ```javascript
-import { LambdaDB } from '@functional-systems/lambdadb';
+import { LambdaDBClient } from '@functional-systems/lambdadb';
 
-const client = new LambdaDB({
-  projectApiKey: process.env.LAMBDADB_API_KEY,
-  serverURL: process.env.LAMBDADB_SERVER_URL,
+const client = new LambdaDBClient({
+  projectApiKey: process.env.LAMBDADB_PROJECT_API_KEY,
+  baseUrl: process.env.LAMBDADB_BASE_URL,
+  projectName: process.env.LAMBDADB_PROJECT_NAME,
   timeoutMs: 10000
 });
 
 // List collections
-const collections = await client.collections.list();
+const collections = await client.listCollections();
 console.log(`Found ${collections.collections.length} collections`);
 
-// Test KNN query
-const response = await client.collections.query({
-  collectionName: 'test_collection',
-  requestBody: {
-    size: 1,
-    query: {
-      knn: {
-        field: "vector",
-        queryVector: [0.1, 0.2, 0.3],
-        k: 1
-      }
+// Test KNN query (use collection handle)
+const collection = client.collection('test_collection');
+const response = await collection.query({
+  size: 1,
+  query: {
+    knn: {
+      field: "vector",
+      queryVector: [0.1, 0.2, 0.3],
+      k: 1
     }
   }
 });
@@ -205,23 +220,7 @@ const response = await client.collections.query({
 - Cleanup may fail if collection is in CREATING state
 
 ### Retry Configuration
-```typescript
-// Optimized retry settings for tests
-retryOptions: {
-  maxAttempts: 2,        // Lower for tests
-  initialDelay: 100,     // Faster for tests  
-  maxDelay: 1000,
-  exponentialBase: 2
-}
-
-// Production retry settings
-retryOptions: {
-  maxAttempts: 3,
-  initialDelay: 500,
-  maxDelay: 5000,
-  exponentialBase: 2
-}
-```
+The vector store does not accept or use `retryOptions`; retries are handled by the LambdaDB client. Configure timeout/retry on the client when creating it (e.g. `timeoutMs`). For tests, use a shorter timeout if needed.
 
 ### Test Timeouts
 - Basic operations: 30 seconds
@@ -229,7 +228,7 @@ retryOptions: {
 - Complex multi-step tests: 120 seconds
 
 ## 📦 Dependencies & Versions
-- `@functional-systems/lambdadb`: ^0.1.5
+- `@functional-systems/lambdadb`: ^0.3.x (use collection handle: `client.collection(name)`)
 - `@langchain/core`: ^0.3.77  
 - `vitest`: ^3.2.4 (preferred over Jest for performance)
 - Node.js: ES modules with `"type": "module"`
@@ -269,27 +268,26 @@ retryOptions: {
 
 4. **Collection creation fails?**
    - Check API key permissions
-   - Verify server URL is correct
-   - Try with `retryOptions: { maxAttempts: 1 }` for debugging
+   - Verify base URL and project name (or serverURL) on the client
 
 ## 🚀 Production Readiness Status
 
 ### ✅ COMPLETED - Ready for Production
 - ✅ **Error handling** with specific LambdaDB error types and comprehensive validation
-- ✅ **Retry logic** with exponential backoff and configurable timeout settings
+- ✅ **Client-level retries**: Rely on LambdaDB client for retries; no separate retry layer in vector store
 - ✅ **Configurable field names** (textField, vectorField) with proper defaults
 - ✅ **Collection lifecycle management** with state monitoring and proper cleanup
-- ✅ **Comprehensive test coverage**: 43 tests (16 unit + 27 integration) - ALL PASSING
+- ✅ **Comprehensive test coverage**: unit tests (lambdadb-vector-store.test.ts) + integration tests - ALL PASSING
 - ✅ **TypeScript definitions** and proper ES module exports
 - ✅ **MMR (Max Marginal Relevance)** search implementation with diversity controls
-- ✅ **Eventual consistency handling** with `consistentRead: true` by default
-- ✅ **Batch processing** with efficient bulk operations
+- ✅ **Consistency**: Default is eventual; set `defaultConsistentRead: true` when you need consistent reads (e.g. see writes immediately)
+- ✅ **Upsert strategy**: payload ≤1MB → single upsert; >1MB → single bulkUpsertDocs call
 - ✅ **Vector validation** with dimension checking and mismatch detection
 - ✅ **LangChain integration** following all vector store patterns and interfaces
 
 ### 📊 Test Results Summary
-- **Unit Tests**: 16/16 passing ✅
-- **Integration Tests**: 27/27 passing ✅
+- **Unit Tests**: lambdadb-vector-store.test.ts (all passing)
+- **Integration Tests**: comprehensive, api-diagnostic, minimal (all passing)
 - **Total Coverage**: All core functionality, edge cases, and error scenarios
 - **Test Categories**: Document operations, vector search, MMR, factory methods, error handling, performance
 
@@ -297,7 +295,7 @@ retryOptions: {
 - **Modular Design**: Clean separation between vector store logic and LambdaDB client
 - **Type Safety**: Full TypeScript support with comprehensive interfaces
 - **Performance**: Optimized batch operations and efficient vector queries
-- **Reliability**: Built-in retry mechanisms and proper error propagation
+- **Reliability**: Client handles retries; clear errors when collection is missing
 
 ## 🎯 Implementation Summary
 
@@ -305,16 +303,16 @@ This LangChain-LambdaDB integration is **production-ready** with:
 
 - **Complete Feature Parity** with Python implementation
 - **Zero Known Issues** - all major challenges resolved
-- **Comprehensive Testing** - 43 tests covering all scenarios
-- **Performance Optimized** - efficient batch operations and proper retry logic
+- **Comprehensive Testing** - unit and integration tests covering all scenarios
+- **Performance Optimized** - single upsert or single bulkUpsertDocs by payload size; client retries
 - **Type Safe** - full TypeScript support with detailed interfaces
 - **Well Documented** - extensive documentation and usage examples
 
 ### 🔧 Key Technical Achievements
 
 1. **Proper LambdaDB Integration**: Correct client configuration, KNN queries, field naming
-2. **Eventual Consistency Mastery**: Implemented `consistentRead: true` for immediate reads
-3. **Robust Error Handling**: Comprehensive validation, retry logic, proper error propagation
+2. **Consistency**: Default eventual consistency; optional `defaultConsistentRead: true` or per-call `consistentRead` for immediate reads
+3. **Robust Error Handling**: Comprehensive validation, clear collection-missing errors; retries via client
 4. **Complete LangChain Compatibility**: All vector store methods, factory patterns, MMR support
 5. **Production Quality**: Proper logging, cleanup, state management, and error recovery
 

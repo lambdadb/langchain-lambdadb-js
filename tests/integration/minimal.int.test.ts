@@ -2,11 +2,15 @@
  * Minimal Integration Test for LambdaDB Vector Store
  *
  * Uses defaultConsistentRead: true so query/fetch see writes immediately (LambdaDB is eventually consistent by default).
+ * Collections are created/deleted via the LambdaDB client.
  */
 
 import { describe, it, expect } from 'vitest';
+import { LambdaDBClient } from '@functional-systems/lambdadb';
 import { LambdaDBVectorStore } from '../../src/index.js';
 import { EmbeddingsInterface } from '@langchain/core/embeddings';
+
+const VECTOR_DIMENSIONS = 3;
 
 // Minimal embeddings for testing
 class MinimalEmbeddings implements EmbeddingsInterface {
@@ -19,50 +23,63 @@ class MinimalEmbeddings implements EmbeddingsInterface {
   }
 }
 
+async function createTestCollection(client: LambdaDBClient, collectionName: string): Promise<void> {
+  await client.createCollection({
+    collectionName,
+    indexConfigs: {
+      vector: { type: 'vector', dimensions: VECTOR_DIMENSIONS, similarity: 'cosine' },
+      page_content: { type: 'text', analyzers: ['english'] },
+    },
+  });
+  const deadline = Date.now() + 30000;
+  while (Date.now() < deadline) {
+    const list = await client.listCollections();
+    const col = (list as { collections?: Array<{ collectionName?: string; collectionStatus?: string }> }).collections?.find(
+      (c) => c.collectionName === collectionName
+    );
+    if (col?.collectionStatus === 'ACTIVE') return;
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  throw new Error(`Collection ${collectionName} did not become ACTIVE in time`);
+}
+
 describe('LambdaDB Minimal Integration Test', () => {
   it('should perform basic vector store operations', async () => {
-    if (!process.env.LAMBDADB_API_KEY) {
-      throw new Error('LAMBDADB_API_KEY environment variable is required');
+    if (!process.env.LAMBDADB_PROJECT_API_KEY) {
+      throw new Error('LAMBDADB_PROJECT_API_KEY environment variable is required');
     }
 
+    const client = new LambdaDBClient({
+      projectApiKey: process.env.LAMBDADB_PROJECT_API_KEY!,
+      baseUrl: process.env.LAMBDADB_BASE_URL,
+      projectName: process.env.LAMBDADB_PROJECT_NAME,
+      timeoutMs: 10000,
+    });
     const embeddings = new MinimalEmbeddings();
     const collectionName = `minimal_test_${Date.now()}`;
-    
-    // Use minimal configuration to avoid hanging
-    const config = {
-      projectApiKey: process.env.LAMBDADB_API_KEY!,
-      ...(process.env.LAMBDADB_SERVER_URL && { serverURL: process.env.LAMBDADB_SERVER_URL }),
-      collectionName,
-      vectorDimensions: 3,
-      similarityMetric: 'cosine' as const,
-      defaultConsistentRead: true,
-      validateCollection: false,
-      retryOptions: { maxAttempts: 1, initialDelay: 0 },
-    };
 
-    const vectorStore = new LambdaDBVectorStore(embeddings, config);
-    
+    await createTestCollection(client, collectionName);
+
+    const vectorStore = new LambdaDBVectorStore(embeddings, {
+      collection: client.collection(collectionName),
+      defaultConsistentRead: true,
+    });
+
     try {
-      // Test basic operations
-      await vectorStore.createCollection();
-      
       const info = await vectorStore.getCollectionInfo();
       expect(info.name).toBe(collectionName);
-      expect(info.status).toBe('ACTIVE'); // Should be ACTIVE since createCollection() waits
-      
-      // Test vector store type
+      expect(info.status).toBe('ACTIVE');
+
       expect(vectorStore._vectorstoreType()).toBe('lambdadb');
-      
+
       console.log(`✅ Minimal integration test completed for collection: ${collectionName}`);
-      
     } finally {
-      // Cleanup
       try {
-        await vectorStore.deleteCollection();
+        await client.collection(collectionName).delete();
         console.log(`🧹 Cleaned up collection: ${collectionName}`);
       } catch (error) {
-        console.warn(`⚠️ Cleanup warning: ${error.message}`);
+        console.warn(`⚠️ Cleanup warning: ${(error as Error).message}`);
       }
     }
-  }, 60000); // Increased timeout to accommodate collection creation waiting
+  }, 60000);
 });

@@ -28,18 +28,19 @@ async function waitForCollectionActive(
 
 describe('LambdaDB API Diagnostic', () => {
   it('should connect to LambdaDB and list collections', async () => {
-    if (!process.env.LAMBDADB_API_KEY) {
-      throw new Error('LAMBDADB_API_KEY environment variable is required');
+    if (!process.env.LAMBDADB_PROJECT_API_KEY) {
+      throw new Error('LAMBDADB_PROJECT_API_KEY environment variable is required');
     }
 
     const client = new LambdaDBClient({
-      projectApiKey: process.env.LAMBDADB_API_KEY!,
-      ...(process.env.LAMBDADB_SERVER_URL && { serverURL: process.env.LAMBDADB_SERVER_URL }),
+      projectApiKey: process.env.LAMBDADB_PROJECT_API_KEY!,
+      baseUrl: process.env.LAMBDADB_BASE_URL,
+      projectName: process.env.LAMBDADB_PROJECT_NAME,
       timeoutMs: 10000
     });
     console.log('🔍 Testing LambdaDB API connectivity...');
-    console.log('📡 API Key:', process.env.LAMBDADB_API_KEY?.slice(0, 10) + '...');
-    console.log('🌐 Server URL:', process.env.LAMBDADB_SERVER_URL || 'default');
+    console.log('📡 API Key:', process.env.LAMBDADB_PROJECT_API_KEY?.slice(0, 10) + '...');
+    console.log('🌐 Base URL:', process.env.LAMBDADB_BASE_URL || 'default');
 
     try {
       const response = await client.listCollections();
@@ -58,13 +59,14 @@ describe('LambdaDB API Diagnostic', () => {
   }, 30000);
 
   it('should handle collection creation attempt', async () => {
-    if (!process.env.LAMBDADB_API_KEY) {
-      throw new Error('LAMBDADB_API_KEY environment variable is required');
+    if (!process.env.LAMBDADB_PROJECT_API_KEY) {
+      throw new Error('LAMBDADB_PROJECT_API_KEY environment variable is required');
     }
 
     const client = new LambdaDBClient({
-      projectApiKey: process.env.LAMBDADB_API_KEY!,
-      ...(process.env.LAMBDADB_SERVER_URL && { serverURL: process.env.LAMBDADB_SERVER_URL }),
+      projectApiKey: process.env.LAMBDADB_PROJECT_API_KEY!,
+      baseUrl: process.env.LAMBDADB_BASE_URL,
+      projectName: process.env.LAMBDADB_PROJECT_NAME,
       timeoutMs: 10000
     });
 

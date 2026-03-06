@@ -1,31 +1,15 @@
 import { Document } from "@langchain/core/documents";
-import { LambdaDBDocument, SimilaritySearchResult, type LambdaDBFilterObject } from "./types.js";
-
-/**
- * Convert LangChain Document to LambdaDB document format
- */
-export function documentToLambdaDB(
-  doc: Document,
-  embedding: number[],
-  id?: string
-): LambdaDBDocument {
-  return {
-    id,
-    content: doc.pageContent,
-    embedding,
-    metadata: doc.metadata || {},
-  };
-}
+import type { LambdaDBFilterObject, LambdaDBVectorStoreConfig } from "./types.js";
 
 /**
  * Convert LambdaDB document back to LangChain Document
  */
 export function lambdaDBToDocument(
   lambdaDoc: any, 
-  textField: string = "content"
+  textField: string = "page_content"
 ): Document {
   // Extract text content from the specified field
-  const pageContent = lambdaDoc[textField] || lambdaDoc.content || lambdaDoc.pageContent || "";
+  const pageContent = lambdaDoc[textField] || lambdaDoc.page_content || lambdaDoc.pageContent || lambdaDoc.content || "";
   
   // Extract metadata (exclude vector field and text field from metadata)
   const metadata = { ...lambdaDoc };
@@ -38,19 +22,6 @@ export function lambdaDBToDocument(
     pageContent,
     metadata,
   });
-}
-
-/**
- * Convert search results with scores to the expected format
- */
-export function formatSearchResults(
-  results: any[],
-  includeScores: boolean = true
-): SimilaritySearchResult[] {
-  return results.map((result) => ({
-    document: lambdaDBToDocument(result),
-    score: includeScores && result._score ? result._score : 0,
-  }));
 }
 
 /**
@@ -75,21 +46,12 @@ export function validateVectorDimensions(
 }
 
 /**
- * Validate configuration parameters
+ * Validate vector store configuration parameters.
+ * Dimension is derived from embeddings (cached on first use).
  */
-export function validateConfig(config: {
-  projectApiKey: string;
-  collectionName: string;
-  vectorDimensions: number;
-}): void {
-  if (!config.projectApiKey) {
-    throw new Error("projectApiKey is required");
-  }
-  if (!config.collectionName) {
-    throw new Error("collectionName is required");
-  }
-  if (!config.vectorDimensions || config.vectorDimensions <= 0) {
-    throw new Error("vectorDimensions must be a positive number");
+export function validateConfig(config: LambdaDBVectorStoreConfig): void {
+  if (config.collection == null) {
+    throw new Error("collection is required");
   }
 }
 
@@ -198,85 +160,6 @@ export function handleLambdaDBError(error: any): Error {
 }
 
 /**
- * Retry configuration options
- */
-export interface RetryOptions {
-  maxAttempts: number;
-  initialDelay: number;
-  maxDelay: number;
-  backoffMultiplier: number;
-  retryableErrors: string[];
-}
-
-/**
- * Default retry configuration
- */
-export const DEFAULT_RETRY_OPTIONS: RetryOptions = {
-  maxAttempts: 3,
-  initialDelay: 1000,
-  maxDelay: 10000,
-  backoffMultiplier: 2,
-  retryableErrors: [
-    'LambdaDBConnectionError',
-    'LambdaDBRateLimitError',
-    'ECONNREFUSED',
-    'ENOTFOUND',
-    'TIMEOUT'
-  ],
-};
-
-/**
- * Execute function with retry logic
- */
-export async function withRetry<T>(
-  fn: () => Promise<T>, 
-  options: Partial<RetryOptions> = {}
-): Promise<T> {
-  const config = { ...DEFAULT_RETRY_OPTIONS, ...options };
-  let lastError: Error;
-  
-  for (let attempt = 1; attempt <= config.maxAttempts; attempt++) {
-    try {
-      return await fn();
-    } catch (error) {
-      lastError = error as Error;
-      
-      // Don't retry if this is the last attempt
-      if (attempt === config.maxAttempts) {
-        break;
-      }
-      
-      // Check if error is retryable
-      const isRetryable = config.retryableErrors.some(errorType => 
-        lastError.name === errorType || 
-        lastError.message.includes(errorType) ||
-        (lastError as any).code === errorType
-      );
-      
-      if (!isRetryable) {
-        break;
-      }
-      
-      // Calculate delay with exponential backoff
-      let delay = config.initialDelay * Math.pow(config.backoffMultiplier, attempt - 1);
-      
-      // Handle rate limit specific delay
-      if (lastError instanceof LambdaDBRateLimitError && lastError.retryAfter) {
-        delay = lastError.retryAfter * 1000; // Convert seconds to milliseconds
-      }
-      
-      delay = Math.min(delay, config.maxDelay);
-      
-      console.warn(`LambdaDB operation failed (attempt ${attempt}/${config.maxAttempts}), retrying in ${delay}ms:`, lastError.message);
-      
-      await new Promise(resolve => setTimeout(resolve, delay));
-    }
-  }
-  
-  throw lastError!;
-}
-
-/**
  * Cosine similarity between two vectors (returns value in [-1, 1]).
  * Used for MMR diversity/relevance balance.
  */
@@ -295,15 +178,10 @@ export function cosineSimilarity(a: number[], b: number[]): number {
 }
 
 /**
- * Batch array into smaller chunks for processing
+ * Payload size threshold (1MB). Below this the vector store uses a single upsert; above it uses bulkUpsertDocs.
+ * Aligns with Python implementation: UPSERT_PAYLOAD_SIZE_THRESHOLD_BYTES.
  */
-export function batchArray<T>(array: T[], batchSize: number): T[][] {
-  const batches: T[][] = [];
-  for (let i = 0; i < array.length; i += batchSize) {
-    batches.push(array.slice(i, i + batchSize));
-  }
-  return batches;
-}
+export const UPSERT_PAYLOAD_SIZE_THRESHOLD_BYTES = 1024 * 1024;
 
 /**
  * Convert a filter (string, LambdaDB object, or function) to LambdaDB API filter for query/delete.

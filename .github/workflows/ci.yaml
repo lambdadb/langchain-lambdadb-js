@@ -1,5 +1,5 @@
 # CI: lint, unit test, build on push and pull_request.
-# Integration tests require LAMBDADB_API_KEY and are not run here.
+# Integration tests require LAMBDADB_PROJECT_API_KEY, LAMBDADB_BASE_URL, LAMBDADB_PROJECT_NAME and are not run here.
 name: CI
 
 on:
