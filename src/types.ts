@@ -1,15 +1,8 @@
 import { Document } from "@langchain/core/documents";
+import type { LambdaDBClient } from "@functional-systems/lambdadb";
 
-/**
- * Retry configuration options
- */
-export interface RetryOptions {
-  maxAttempts: number;
-  initialDelay: number;
-  maxDelay: number;
-  backoffMultiplier: number;
-  retryableErrors: string[];
-}
+/** Collection handle type (returned by client.collection(name)); has .collectionName. */
+export type LambdaDBCollectionHandle = ReturnType<LambdaDBClient["collection"]>;
 
 /**
  * Supported similarity metrics for LambdaDB vector search
@@ -24,63 +17,18 @@ export interface PartitionConfigOption {
 }
 
 /**
- * Configuration options for LambdaDB vector store
+ * Configuration options for LambdaDB vector store.
+ * Pass a collection handle (client.collection(name)); create/delete collections via the LambdaDB client.
  */
-export interface LambdaDBConfig {
-  /** LambdaDB project API key */
-  projectApiKey: string;
-  /**
-   * API base URL (e.g. https://api.lambdadb.ai). Preferred with projectName.
-   * @see https://github.com/lambdadb/lambdadb-typescript-client
-   */
-  baseUrl?: string;
-  /**
-   * Project name (path segment under /projects/). Preferred with baseUrl.
-   * @see https://github.com/lambdadb/lambdadb-typescript-client
-   */
-  projectName?: string;
-  /**
-   * Custom server URL (optional). Full base URL override.
-   * @deprecated Prefer baseUrl + projectName. Kept for backward compatibility.
-   */
-  serverURL?: string;
-  /** Name of the collection to use */
-  collectionName: string;
-  /** Vector dimensions for the embeddings */
-  vectorDimensions: number;
-  /** Similarity metric to use for vector comparisons */
-  similarityMetric?: SimilarityMetric;
-  /** Custom index configuration */
-  indexConfig?: Record<string, any>;
-  /** Name of the text field in documents (default: "content") */
+export interface LambdaDBVectorStoreConfig {
+  /** LambdaDB collection handle (e.g. client.collection('my-docs')). */
+  collection: LambdaDBCollectionHandle;
+  /** Name of the text field in documents (default: "page_content") */
   textField?: string;
-  /** Name of the vector field in documents (default: "embedding") */
+  /** Name of the vector field in documents (default: "vector") */
   vectorField?: string;
-  /** Whether to validate that the collection exists on initialization */
-  validateCollection?: boolean;
-  /** Default setting for consistent reads (default: false) */
+  /** Use consistent reads for query/fetch (default: false). Set true when you need to see writes immediately; otherwise LambdaDB uses eventual consistency. */
   defaultConsistentRead?: boolean;
-  /** Retry configuration for failed operations */
-  retryOptions?: Partial<RetryOptions>;
-  /** Optional partition config for collection creation (future use) */
-  partitionConfig?: PartitionConfigOption;
-}
-
-/**
- * Options for creating a new collection
- */
-export interface CreateCollectionOptions {
-  /** Collection name */
-  name: string;
-  /** Vector field configuration */
-  vectorConfig: {
-    dimensions: number;
-    similarity: SimilarityMetric;
-  };
-  /** Additional index configuration */
-  indexConfig?: Record<string, any>;
-  /** Optional partition config (LambdaDB API) */
-  partitionConfig?: PartitionConfigOption;
 }
 
 /**
@@ -139,6 +87,14 @@ export interface QueryOptions {
 export type DocumentFilter = (doc: Document) => boolean;
 
 /**
+ * Optional per-call override for search methods (e.g. consistentRead).
+ */
+export interface VectorSearchOptions {
+  /** Override defaultConsistentRead for this call. When true, query uses consistent read. */
+  consistentRead?: boolean;
+}
+
+/**
  * Options for maximum marginal relevance search
  */
 export interface MaxMarginalRelevanceSearchOptions {
@@ -150,6 +106,8 @@ export interface MaxMarginalRelevanceSearchOptions {
   lambda?: number;
   /** Filter function for documents */
   filter?: DocumentFilter | string | object;
+  /** Override defaultConsistentRead for this call. When true, query uses consistent read. */
+  consistentRead?: boolean;
 }
 
 /**

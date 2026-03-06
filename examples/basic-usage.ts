@@ -1,30 +1,33 @@
 /**
  * Basic usage example for LangChain LambdaDB integration
- * 
+ *
  * This example demonstrates:
- * - Setting up the vector store
- * - Adding documents
- * - Performing similarity search
- * - Using with different embedding models
+ * - Creating a LambdaDB client (reuse for multiple collections)
+ * - Setting up the vector store with client, embeddings, and config
+ * - Adding documents and performing similarity search
  */
 
+import { LambdaDBClient } from '@functional-systems/lambdadb';
 import { LambdaDBVectorStore } from '../src/index.js';
 import { OpenAIEmbeddings } from '@langchain/openai';
 import { Document } from '@langchain/core/documents';
 
 async function basicExample() {
-  // Initialize OpenAI embeddings
-  const embeddings = new OpenAIEmbeddings({
-    apiKey: process.env.OPENAI_API_KEY!,
-    model: 'text-embedding-3-small', // 1536 dimensions
+  // Create LambdaDB client once (reuse across multiple collections)
+  const client = new LambdaDBClient({
+    projectApiKey: process.env.LAMBDADB_PROJECT_API_KEY!,
+    baseUrl: process.env.LAMBDADB_BASE_URL ?? 'https://api.lambdadb.ai',
+    projectName: process.env.LAMBDADB_PROJECT_NAME ?? 'your-project',
+    timeoutMs: 30000,
   });
 
-  // Configure LambdaDB
+  const embeddings = new OpenAIEmbeddings({
+    apiKey: process.env.OPENAI_API_KEY!,
+    model: 'text-embedding-3-small',
+  });
+
   const config = {
-    projectApiKey: process.env.LAMBDADB_PROJECT_API_KEY!,
-    collectionName: 'langchain-example',
-    vectorDimensions: 1536,
-    similarityMetric: 'cosine' as const,
+    collection: client.collection('langchain-example'),
   };
 
   console.log('🚀 Creating LambdaDB vector store...');
@@ -95,7 +98,14 @@ async function basicExample() {
 
 async function fromTextsExample() {
   console.log('\n📚 Creating vector store from texts...');
-  
+
+  const client = new LambdaDBClient({
+    projectApiKey: process.env.LAMBDADB_PROJECT_API_KEY!,
+    baseUrl: process.env.LAMBDADB_BASE_URL ?? 'https://api.lambdadb.ai',
+    projectName: process.env.LAMBDADB_PROJECT_NAME ?? 'your-project',
+    timeoutMs: 30000,
+  });
+
   const embeddings = new OpenAIEmbeddings({
     apiKey: process.env.OPENAI_API_KEY!,
     model: 'text-embedding-3-small',
@@ -119,11 +129,7 @@ async function fromTextsExample() {
     texts,
     metadatas,
     embeddings,
-    {
-      projectApiKey: process.env.LAMBDADB_PROJECT_API_KEY!,
-      collectionName: 'from-texts-example',
-      vectorDimensions: 1536,
-    }
+    { collection: client.collection('from-texts-example') }
   );
 
   const searchResults = await vectorStore.similaritySearch('neural networks', 2);

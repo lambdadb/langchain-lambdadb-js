@@ -10,10 +10,10 @@ A production-ready TypeScript library that integrates [LambdaDB](https://lambdad
 - 📊 **Batch Operations**: Efficient bulk document insertion and processing
 - 🔍 **Flexible Configuration**: Custom field names, similarity metrics, and collection settings
 - 🛡️ **Type Safety**: Full TypeScript support with comprehensive type definitions
-- ⚡ **High Performance**: Leverages LambdaDB's optimized vector search engine with consistent reads
-- 🧪 **Production Ready**: Comprehensive test suite with 43 passing tests (16 unit + 27 integration)
-- 🔄 **Retry Logic**: Built-in exponential backoff for robust error handling
-- 📈 **Collection Management**: Full lifecycle management with state monitoring
+- ⚡ **High Performance**: Leverages LambdaDB's optimized vector search engine; optional consistent reads when you need to see writes immediately
+- 🧪 **Production Ready**: Comprehensive test suite (unit and integration tests)
+- 🔄 **Retries**: Rely on the LambdaDB client for retries; vector store does not add its own retry layer
+- 📦 **Collection lifecycle**: Create/delete collections via the LambdaDB client; vector store assumes the collection already exists
 - 🗑️ **Document Deletion**: LangChain `delete()` support with server-side LambdaDB filter (by ids, filter, or deleteAll)
 
 ## Installation
@@ -25,35 +25,37 @@ npm install langchain-lambdadb @langchain/core
 ## Quick Start
 
 ```typescript
+import { LambdaDBClient } from '@functional-systems/lambdadb';
 import { LambdaDBVectorStore } from 'langchain-lambdadb';
 import { OpenAIEmbeddings } from '@langchain/openai';
 import { Document } from '@langchain/core/documents';
+
+// Create LambdaDB client once (reuse across multiple collections)
+const client = new LambdaDBClient({
+  projectApiKey: process.env.LAMBDADB_PROJECT_API_KEY!,
+  baseUrl: process.env.LAMBDADB_BASE_URL ?? 'https://api.lambdadb.ai',
+  projectName: process.env.LAMBDADB_PROJECT_NAME ?? 'your-project',
+  timeoutMs: 30000,
+});
 
 // Initialize embeddings
 const embeddings = new OpenAIEmbeddings({
   apiKey: process.env.OPENAI_API_KEY
 });
 
-// Configure LambdaDB connection
-const config = {
-  projectApiKey: process.env.LAMBDADB_API_KEY!,
-  serverURL: process.env.LAMBDADB_SERVER_URL, // Optional: custom server
+// Create the collection via the LambdaDB client first (vector store assumes it exists)
+await client.createCollection({
   collectionName: 'my-documents',
-  vectorDimensions: 1536, // OpenAI embedding dimensions
-  similarityMetric: 'cosine',
-  // Optional: Configure retry behavior
-  retryOptions: {
-    maxAttempts: 3,
-    initialDelay: 500,
-    maxDelay: 5000
-  }
-};
+  indexConfigs: {
+    vector: { type: 'vector', dimensions: 1536, similarity: 'cosine' }, // dimensions must match your embeddings
+    page_content: { type: 'text', analyzers: ['english'] },
+  },
+});
 
-// Create vector store
-const vectorStore = new LambdaDBVectorStore(embeddings, config);
-
-// Create collection if it doesn't exist
-await vectorStore.createCollection();
+// Create vector store with a collection handle (embeddings, config) — same signature as base VectorStore
+const vectorStore = new LambdaDBVectorStore(embeddings, {
+  collection: client.collection('my-documents'),
+});
 
 // Add documents
 const documents = [
@@ -74,48 +76,64 @@ const results = await vectorStore.similaritySearch('What is LangChain?', 5);
 console.log(results);
 ```
 
+Using the same client for multiple collections:
+
+```typescript
+const storeA = new LambdaDBVectorStore(embeddings, { collection: client.collection('collection-a') });
+const storeB = new LambdaDBVectorStore(embeddings, { collection: client.collection('collection-b') });
+```
+
 ## Configuration Options
 
-### LambdaDBConfig
+Connection (API key, base URL, project name) is set on **LambdaDBClient** from `@functional-systems/lambdadb`. The vector store assumes the **collection already exists**. If you call any operation (e.g. `addDocuments`, `similaritySearch`) when the collection does not exist, the store throws a clear error: *"Collection does not exist. Create it first using the LambdaDB client (...), then try again."* (The collection name is included in the message when available from the SDK.) Create and delete collections using the LambdaDB client directly (e.g. `client.createCollection(...)`, `client.collection(name).delete()`). Vector dimension is derived from the embeddings instance (cached on first use).
+
+### LambdaDBVectorStoreConfig
 
 | Option | Type | Required | Description |
 |--------|------|----------|-------------|
-| `projectApiKey` | `string` | ✅ | Your LambdaDB project API key |
-| `collectionName` | `string` | ✅ | Name of the collection to use |
-| `vectorDimensions` | `number` | ✅ | Vector dimensions for embeddings |
-| `similarityMetric` | `SimilarityMetric` | ❌ | Similarity metric (default: 'cosine') |
-| `baseUrl` | `string` | ❌ | API base URL (e.g. https://api.lambdadb.ai). Preferred with `projectName`. |
-| `projectName` | `string` | ❌ | Project name (path under /projects/). Preferred with `baseUrl`. |
-| `serverURL` | `string` | ❌ | **Deprecated.** Full server URL override. Prefer `baseUrl` + `projectName`. |
-| `textField` | `string` | ❌ | Field name for document content (default: 'content') |
+| `collection` | `LambdaDBCollectionHandle` | ✅ | Collection handle (e.g. `client.collection('my-docs')`). |
+| `textField` | `string` | ❌ | Field name for document content (default: 'page_content') |
 | `vectorField` | `string` | ❌ | Field name for vectors (default: 'vector') |
-| `validateCollection` | `boolean` | ❌ | Validate collection before operations (default: false) |
-| `defaultConsistentRead` | `boolean` | ❌ | Use consistent reads by default (default: true) |
-| `retryOptions` | `RetryOptions` | ❌ | Configure retry behavior with exponential backoff |
-| `partitionConfig` | `PartitionConfigOption` | ❌ | Optional partition config for collection creation |
+| `defaultConsistentRead` | `boolean` | ❌ | Use consistent reads for query/fetch (default: false). Set true when you need to see writes immediately; otherwise LambdaDB uses eventual consistency. You can also override per call via search method options (e.g. `similaritySearch(..., { consistentRead: true })`). |
 
-### Similarity Metrics
+### Collection lifecycle
 
-- `'cosine'` - Cosine similarity (default, recommended for most use cases)
-- `'euclidean'` - Euclidean distance 
-- `'dot_product'` - Dot product similarity
+Create and delete collections via the **LambdaDB client**, not the vector store:
+
+```typescript
+// Create a collection (dimensions must match your embedding model)
+await client.createCollection({
+  collectionName: 'my-documents',
+  indexConfigs: {
+    vector: { type: 'vector', dimensions: 1536, similarity: 'cosine' },
+    page_content: { type: 'text', analyzers: ['english'] },
+    // Optional: keyword fields for filtering
+    category: { type: 'keyword' },
+  },
+});
+
+// Delete when no longer needed
+await client.collection('my-documents').delete();
+```
+
+Similarity metrics: `'cosine'` (default), `'euclidean'`, `'dot_product'`, `'max_inner_product'`. See [LambdaDB docs](https://docs.lambdadb.ai) for `indexConfigs` and `partitionConfig`.
 
 ## Usage Examples
 
 ### Basic Vector Search
 
 ```typescript
+import { LambdaDBClient } from '@functional-systems/lambdadb';
 import { LambdaDBVectorStore } from 'langchain-lambdadb';
 import { OpenAIEmbeddings } from '@langchain/openai';
 
-const vectorStore = new LambdaDBVectorStore(
-  new OpenAIEmbeddings(),
-  {
-    projectApiKey: process.env.LAMBDADB_API_KEY!,
-    collectionName: 'documents',
-    vectorDimensions: 1536,
-  }
-);
+const client = new LambdaDBClient({
+  projectApiKey: process.env.LAMBDADB_PROJECT_API_KEY!,
+  baseUrl: process.env.LAMBDADB_BASE_URL ?? 'https://api.lambdadb.ai',
+  projectName: process.env.LAMBDADB_PROJECT_NAME ?? 'your-project',
+});
+
+const vectorStore = new LambdaDBVectorStore(new OpenAIEmbeddings(), { collection: client.collection('documents') });
 
 // Search with custom parameters
 const results = await vectorStore.similaritySearchWithScore('query text', 10);
@@ -127,42 +145,31 @@ results.forEach(([doc, score]) => {
 ### Using with Different Embedding Models
 
 ```typescript
+import { LambdaDBClient } from '@functional-systems/lambdadb';
 import { HuggingFaceTransformersEmbeddings } from '@langchain/community/embeddings/hf_transformers';
 
-// Using Hugging Face embeddings
+const client = new LambdaDBClient({
+  projectApiKey: process.env.LAMBDADB_PROJECT_API_KEY!,
+  baseUrl: process.env.LAMBDADB_BASE_URL ?? 'https://api.lambdadb.ai',
+  projectName: process.env.LAMBDADB_PROJECT_NAME ?? 'your-project',
+});
+
 const embeddings = new HuggingFaceTransformersEmbeddings({
   modelName: 'Xenova/all-MiniLM-L6-v2',
 });
 
-const vectorStore = new LambdaDBVectorStore(embeddings, {
-  projectApiKey: process.env.LAMBDADB_API_KEY!,
-  collectionName: 'hf-documents',
-  vectorDimensions: 384, // all-MiniLM-L6-v2 dimensions
-  similarityMetric: 'cosine'
-});
+const vectorStore = new LambdaDBVectorStore(embeddings, { collection: client.collection('hf-documents') });
 ```
 
 ### Creating from Texts and Metadata
 
 ```typescript
-// Create vector store from texts
-const texts = [
-  'The quick brown fox jumps over the lazy dog.',
-  'Machine learning is a subset of artificial intelligence.',
-  'Vector databases enable efficient similarity search.'
-];
-
-const metadatas = [
-  { category: 'literature' },
-  { category: 'technology' },
-  { category: 'database' }
-];
-
+// Create vector store from texts (client in config)
 const vectorStore = await LambdaDBVectorStore.fromTexts(
   texts,
   metadatas,
   embeddings,
-  config
+  { collection: client.collection('my-collection') }
 );
 ```
 
@@ -269,8 +276,11 @@ const response = await chain.call({
 #### Constructor
 
 ```typescript
-new LambdaDBVectorStore(embeddings: EmbeddingsInterface, config: LambdaDBConfig)
+new LambdaDBVectorStore(embeddings: EmbeddingsInterface, config: LambdaDBVectorStoreConfig)
 ```
+
+- Same signature as base `VectorStore`. Pass a collection handle via `config.collection` (e.g. `client.collection('my-docs')`).
+- `config`: Must include `collection`; vector dimension is derived from embeddings (cached on first use).
 
 #### Methods
 
@@ -278,22 +288,16 @@ new LambdaDBVectorStore(embeddings: EmbeddingsInterface, config: LambdaDBConfig)
 Adds documents to the vector store with automatic embedding generation. Returns assigned document IDs.
 
 ##### `addVectors(vectors: number[][], documents: Document[]): Promise<string[] \| void>`
-Adds pre-computed vectors with associated documents. Returns assigned document IDs.
+Adds pre-computed vectors with associated documents. Returns assigned document IDs. Payload ≤1MB uses a single `upsert`; larger payloads use `bulkUpsertDocs` (one call).
 
-##### `similaritySearch(query: string, k?: number, filter?: DocumentFilter): Promise<Document[]>`
-Performs similarity search with a text query.
+##### `similaritySearch(query: string, k?: number, filter?, _callbacks?, options?: VectorSearchOptions): Promise<Document[]>`
+Performs similarity search with a text query. **options**: e.g. `{ consistentRead: true }` to override default consistency for this call.
 
-##### `similaritySearchVectorWithScore(query: number[], k: number, filter?: DocumentFilter | LambdaDBFilterObject | string): Promise<[Document, number][]>`
-Performs similarity search with a vector query, returns documents with similarity scores. **Filter**: string or LambdaDB object → server-side `knn.filter`; function → client-side filter after fetch.
+##### `similaritySearchVectorWithScore(query: number[], k: number, filter?, options?: VectorSearchOptions): Promise<[Document, number][]>`
+Performs similarity search with a vector query, returns documents with similarity scores. **Filter**: string or LambdaDB object → server-side `knn.filter`; function → client-side filter after fetch. **options**: e.g. `{ consistentRead: true }` to override default consistency for this call.
 
-##### `maxMarginalRelevanceSearch(query: string, options?: MMRSearchOptions): Promise<Document[]>`
-Performs MMR search using vector similarity: fetches candidates with `includeVectors: true` and balances relevance to the query with diversity among selected documents (cosine similarity).
-
-##### `createCollection(options?: Partial<CreateCollectionOptions>): Promise<void>`
-Creates a new collection in LambdaDB with proper state monitoring.
-
-##### `deleteCollection(): Promise<void>`
-Deletes the collection from LambdaDB.
+##### `maxMarginalRelevanceSearch(query: string, options?: MaxMarginalRelevanceSearchOptions): Promise<Document[]>`
+Performs MMR search using vector similarity: fetches candidates with `includeVectors: true` and balances relevance to the query with diversity among selected documents (cosine similarity). **options** may include `consistentRead?: boolean` to override default consistency for this call.
 
 ##### `getCollectionInfo(): Promise<CollectionInfo>`
 Returns information about the collection including status and document count.
@@ -311,19 +315,53 @@ Lower-level delete with the same options as `delete()`: `ids`, `filter` (string,
 
 #### Static Factory Methods
 
-##### `fromTexts(texts: string[], metadatas: object[] | object, embeddings: EmbeddingsInterface, config: LambdaDBConfig): Promise<LambdaDBVectorStore>`
-Creates a vector store from an array of texts.
+##### `fromTexts(texts: string[], metadatas: object[] | object, embeddings: EmbeddingsInterface, config: LambdaDBVectorStoreConfig): Promise<LambdaDBVectorStore>`
+Creates a vector store from an array of texts. Pass collection via `config.collection`.
 
-##### `fromDocuments(docs: Document[], embeddings: EmbeddingsInterface, config: LambdaDBConfig): Promise<LambdaDBVectorStore>`
-Creates a vector store from an array of documents.
+##### `fromDocuments(docs: Document[], embeddings: EmbeddingsInterface, config: LambdaDBVectorStoreConfig): Promise<LambdaDBVectorStore>`
+Creates a vector store from an array of documents. Pass collection via `config.collection`.
+
+## Migration from previous versions (breaking change)
+
+If you were using the old constructor that accepted connection options in config:
+
+**Before (old API, no longer supported):**
+```typescript
+const vectorStore = new LambdaDBVectorStore(embeddings, {
+  projectApiKey: process.env.LAMBDADB_PROJECT_API_KEY!, // was in config
+  collectionName: 'my-docs',
+  vectorDimensions: 1536,
+});
+```
+
+**After:**
+```typescript
+import { LambdaDBClient } from '@functional-systems/lambdadb';
+
+const client = new LambdaDBClient({
+  projectApiKey: process.env.LAMBDADB_PROJECT_API_KEY!,
+  baseUrl: process.env.LAMBDADB_BASE_URL ?? 'https://api.lambdadb.ai',
+  projectName: process.env.LAMBDADB_PROJECT_NAME ?? 'your-project',
+  timeoutMs: 30000,
+});
+
+const vectorStore = new LambdaDBVectorStore(embeddings, {
+  collection: client.collection('my-docs'),
+});
+```
+
+- Create a `LambdaDBClient` once with your API key and URL/project; get a collection handle with `client.collection('name')` and pass it via **`config.collection`**.
+- Remove `projectApiKey`, `baseUrl`, `projectName`, `serverURL`, and `vectorDimensions` from the config; dimension is derived from the embeddings (cached on first use).
+- Use the same client for multiple collections: `client.collection('a')`, `client.collection('b')`.
 
 ## Environment Variables
 
 You can set your LambdaDB credentials using environment variables:
 
 ```bash
-export LAMBDADB_API_KEY="your-api-key-here"
-export LAMBDADB_SERVER_URL="https://your-instance.lambdadb.ai"  # Optional
+export LAMBDADB_PROJECT_API_KEY="your-project-api-key"
+export LAMBDADB_BASE_URL="https://api.lambdadb.ai"
+export LAMBDADB_PROJECT_NAME="your-project"
 ```
 
 ## Error Handling
@@ -355,11 +393,11 @@ npm test
 # Run only unit tests
 npm run test:unit
 
-# Run only integration tests (requires LAMBDADB_API_KEY)
+# Run only integration tests (requires LAMBDADB_PROJECT_API_KEY, LAMBDADB_BASE_URL, LAMBDADB_PROJECT_NAME)
 npm run test:integration
 ```
 
-**Integration Tests**: Set `LAMBDADB_API_KEY` and optionally `LAMBDADB_SERVER_URL` to run integration tests against real LambdaDB service.
+**Integration Tests**: Set `LAMBDADB_PROJECT_API_KEY`, `LAMBDADB_BASE_URL`, and `LAMBDADB_PROJECT_NAME` to run integration tests against real LambdaDB service.
 
 ### Building
 
@@ -389,11 +427,11 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ### Key Features Implemented
 
-- **Eventual Consistency Handling**: Uses `consistentRead: true` by default for immediate consistency
-- **Collection State Management**: Proper waiting for collection to become ACTIVE before operations
-- **Error Handling**: Comprehensive error handling with retry logic and exponential backoff
+- **Consistency**: Default is eventual consistency; set `defaultConsistentRead: true` in config or pass `{ consistentRead: true }` in search options when you need to see writes immediately (e.g. right after addDocuments)
+- **Collection lifecycle**: Create/delete collections via the LambdaDB client; ensure collection is ACTIVE before using the vector store
+- **Error Handling**: Clear errors when the collection is missing; retries are handled by the LambdaDB client
 - **Field Name Configuration**: Supports custom field names for text and vector data
-- **Batch Processing**: Efficient bulk operations with proper error handling
+- **Upsert strategy**: Payload ≤1MB uses a single `upsert`; larger payloads use a single `bulkUpsertDocs` call
 - **MMR**: Vector-based MMR with `includeVectors: true` and cosine similarity for relevance/diversity balance
 - **Client options**: Prefer `baseUrl` + `projectName`; `serverURL` supported but deprecated
 - **Test Coverage**: Unit and integration tests covering core functionality and edge cases
@@ -402,8 +440,8 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 - Uses KNN query format: `{ knn: { field, queryVector, k } }`
 - Prefer `baseUrl` + `projectName`; use `serverURL` (exact name, not `serverUrl`) only if overriding full URL
-- Supports immediate consistency with `consistentRead: true`
-- Collection creation includes state polling until ACTIVE; optional `partitionConfig` supported
+- Optional consistent read: set `defaultConsistentRead: true` in config or pass `{ consistentRead: true }` to search methods for immediate reads after writes
+- Create collections via the client; optional `partitionConfig` supported. Vector store assumes the collection already exists.
 - **Delete**: Prefer server-side filter (`filter` as string or LambdaDB object) for efficiency; `deleteAll: true` uses LambdaDB filter `{ queryString: { query: "*:*" } }`. [Delete data](https://docs.lambdadb.ai/guides/documents/delete-data)
 
 ## Links
